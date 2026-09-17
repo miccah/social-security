@@ -118,18 +118,22 @@ sequenceDiagram
         F->>G: taken, choose another
     end
     F->>G: prompt SSN
-    F->>R: register pending{username, ssn, addr}
+    F->>R: register pending{username, ssn, addr, decision chan}
     R->>T: event: new request
     F-->>G: "waiting for approval…"
+    Note over F: handler blocks on req.decision (or ctx cancel)
     T->>O: show username + SSN
     Note over O,G: owner confirms SSN out-of-band
     alt accept
         O->>T: accept
-        T->>R: mark active
+        T->>R: resolve(id, accept)
+        R-->>F: decision = accept
         F->>V: ssh -t vm tmux attach -t pairing
         F-->>G: bridged into shared session
     else decline
         O->>T: decline
+        T->>R: resolve(id, decline)
+        R-->>F: decision = decline
         F-->>G: "declined" + disconnect
     end
 ```
@@ -148,9 +152,10 @@ sequenceDiagram
     F->>R: owner_gone
     R->>F: disconnect all active guests
     F-->>F: close guest PTYs / bridges
-    R->>V: kill tmux "pairing"; snapshot VM (retain 7d)
+    R->>V: kill tmux pairing session
+    R->>V: snapshot VM (retain 7d)
     R->>Tn: close ngrok tunnel
-    Note over R: process exits; snapshot GC'd after 7 days
+    Note over R: process exits, snapshot GC'd after 7 days
 ```
 
 ### 6.3 Guest connection state machine
@@ -172,18 +177,31 @@ stateDiagram-v2
 
 ```
 Session
-  project     string          // git repo / local path
+  project     string          // working directory (git optional)
   vm          VMHandle        // qemu pid, host-only IP, ssh key
   tunnel      Addr            // ngrok public host:port
   owner       *Conn           // nil until owner attaches; close ⇒ teardown
-  pending     map[id]Request  // username, ssn, remoteAddr, ptyReq
+  pending     map[id]Request  // in-flight join requests awaiting a decision
   active      map[name]*Conn  // name ⇒ live bridged guest
   mu          sync.Mutex
   events      chan Event      // → control-plane TUI
+
+Request
+  username    string
+  ssn         string
+  remoteAddr  string
+  ptyReq      PTY             // the guest's terminal, held while blocked
+  decision    chan Decision   // buffered(1); front-door goroutine blocks here
 ```
 
+The `decision` channel is the rendezvous between the TUI and the blocked front-door
+goroutine: `registry.Resolve(id, d)` sends on it, waking exactly that guest's handler
+(see §6.1). The handler `select`s on `decision` and `ctx.Done()`, so a guest disconnect
+or timeout while pending also unblocks it and drops the request.
+
 Username uniqueness is enforced against `active` (and `pending`). Kick removes from
-`active` and closes the bridge; the guest may reconnect as a fresh pending request.
+`active` and cancels the connection's context (closing the bridge); the guest may
+reconnect as a fresh pending request.
 
 ## 8. Networking
 
