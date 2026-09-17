@@ -4,9 +4,9 @@ This document describes the functional requirements of this project.
 ## Functionality
 
 * This project is operated by the owner, the user who starts the server
-* The owner starts the server by providing a project name
-* The server creates a sandboxed environment with the existing state of the
-  project
+* The owner starts the server in any directory (the project)
+* The server creates a sandboxed environment seeded with the contents of the
+  directory, respecting .gitignore when copying files
 * The server opens up an ngrok tunnel for SSH connections
 * The owner is prompted to SSH in (via LAN), which starts the session
 * The owner and all users are immediately placed into a shared tmux session
@@ -21,7 +21,8 @@ This document describes the functional requirements of this project.
   must disconnect, as the end of the session
 * The server closes the ngrok tunnel
 * The sandboxed environment is saved for 7 days
-* The changes made during pairing can be pushed to the upstream git repo
+* On session end, the working directory is written back to the host
+* If the project is a git repo, changes can also be pushed to the upstream remote
 
 
 ### Owner
@@ -50,13 +51,14 @@ As a user,
 * A transient disconnect on the owner's connection ends the session for
   everyone
 * A kicked user is allowed to attempt to reconnect
-* The owner's git credentials should be part of the VM to allow committing and
-  pushing (by any user)
+* When the project is a git repo, the owner's git credentials are part of the VM
+  to allow committing and pushing (by any user)
 
 
 ## Definitions
 
-* A project is a git repo (that can also be a local repo path)
+* A project is any directory; it may optionally be a git repo, which enables
+  push-based reintegration
 * A sandbox is an environment where users can modify files freely without
   harming the system (in a NixOS VM)
     * There are no limitations on commands
