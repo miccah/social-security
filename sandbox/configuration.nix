@@ -1,6 +1,12 @@
 # NixOS sandbox VM: a headless guest that hosts the shared pairing tmux session.
 # Clients reach it only through the host loopback forward the VM manager sets up,
 # so the firewall stays off and login is key-only.
+#
+# The VM is composed of three layers: this base module, the owner-environment
+# module (the owner's editor/shell/tmux, borrowed from the host), and the
+# toolchain module (the project's flake dev environment, entered at session
+# start). The base is applied last so its security settings win where they
+# collide.
 { pkgs, modulesPath, ... }:
 
 {
@@ -8,6 +14,8 @@
     # Provides config.system.build.vm, a script that boots this configuration
     # under QEMU with the host Nix store shared over 9p.
     "${modulesPath}/virtualisation/qemu-vm.nix"
+    ./owner-env.nix
+    ./toolchain.nix
   ];
 
   networking.hostName = "sandbox";
@@ -21,6 +29,11 @@
   virtualisation.memorySize = 2048;
   virtualisation.cores = 2;
 
+  # Flakes power the project toolchain (`nix develop`). qemu-vm.nix shares the
+  # host Nix store into the guest, so inputs the owner has already built resolve
+  # without a rebuild.
+  nix.settings.experimental-features = [ "nix-command" "flakes" ];
+
   services.openssh = {
     enable = true;
     settings = {
@@ -29,23 +42,17 @@
     };
   };
 
-  # The manager passes the session's public key through a read-only 9p share
-  # (mount tag "sssh") it adds to the QEMU command at boot. nofail keeps the
-  # guest bootable when no share is attached.
-  fileSystems."/mnt/sssh" = {
-    device = "sssh";
-    fsType = "9p";
-    options = [ "trans=virtio" "version=9p2000.L" "ro" "nofail" "x-systemd.device-timeout=5s" ];
-  };
-
-  # Install the session key as root's authorized key before sshd starts.
+  # The manager stages the session's public key in the host directory the run
+  # script shares into the guest at /tmp/shared (via SHARED_DIR). This installs
+  # it as root's authorized key, owned and permissioned for sshd, before sshd
+  # starts.
   systemd.services.sssh-authorized-keys = {
     description = "Install the session SSH key";
     before = [ "sshd.service" ];
     wantedBy = [ "multi-user.target" ];
     unitConfig = {
-      RequiresMountsFor = "/mnt/sssh";
-      ConditionPathExists = "/mnt/sssh/authorized_keys";
+      RequiresMountsFor = "/tmp/shared";
+      ConditionPathExists = "/tmp/shared/authorized_keys";
     };
     serviceConfig = {
       Type = "oneshot";
@@ -53,26 +60,12 @@
     };
     script = ''
       install -d -m 700 /root/.ssh
-      install -m 600 /mnt/sssh/authorized_keys /root/.ssh/authorized_keys
+      install -m 600 /tmp/shared/authorized_keys /root/.ssh/authorized_keys
     '';
   };
 
-  # The shared read/write session every client attaches to. Started detached so
-  # the tmux server outlives this oneshot and `tmux attach -t pairing` finds it.
-  systemd.services.pairing = {
-    description = "Shared tmux pairing session";
-    after = [ "network.target" ];
-    wantedBy = [ "multi-user.target" ];
-    environment.HOME = "/root";
-    serviceConfig = {
-      Type = "oneshot";
-      RemainAfterExit = true;
-      ExecStart = "${pkgs.tmux}/bin/tmux new-session -d -s pairing";
-      ExecStop = "${pkgs.tmux}/bin/tmux kill-server";
-    };
-  };
-
-  environment.systemPackages = with pkgs; [ tmux git vim curl ];
+  # Base tools present regardless of the owner environment or project toolchain.
+  environment.systemPackages = with pkgs; [ git curl ];
 
   # First release this configuration targets; pins stateful defaults.
   system.stateVersion = "26.05";
