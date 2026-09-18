@@ -19,5 +19,12 @@
         gopls
       ];
     };
+
+    # The sandbox VM the manager boots. Built from this flake, never from the
+    # project directory, so any project boots the identical sandbox.
+    nixosConfigurations.sandbox = nixpkgs.lib.nixosSystem {
+      inherit system;
+      modules = [ ./sandbox/configuration.nix ];
+    };
   };
 }
