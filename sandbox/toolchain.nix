@@ -23,6 +23,12 @@ let
     exec "$shell" -l
   '';
 in {
+  # direnv + nix-direnv + the zsh hook (programs.zsh is enabled in owner-env), so
+  # a project `.envrc` (`use flake`) auto-loads on cd and nix-direnv caches the
+  # dev shell for instant re-entry. The pane command's login-shell fallback picks
+  # this up without further wiring.
+  programs.direnv.enable = true;
+
   # The manager exports the project over 9p read/write with mount tag "project".
   # qemu-vm.nix overrides top-level fileSystems with mkVMOverride, so guest mounts
   # must be declared here under virtualisation.fileSystems. nofail keeps the guest
