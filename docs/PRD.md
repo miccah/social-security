@@ -7,6 +7,10 @@ This document describes the functional requirements of this project.
 * The owner starts the server in any directory (the project)
 * The server creates a sandboxed environment seeded with a full copy of the
   directory's contents
+* The sandboxed environment carries the project's own toolchain when the project
+  defines one (a flake), so the pair can build, run, and test
+* The sandboxed environment reuses the owner's editor, shell, and tmux
+  configuration, so the shared session matches the owner's usual setup
 * The server opens up an ngrok tunnel for SSH connections
 * The owner is prompted to SSH in (via LAN), which starts the session
 * The owner and all users are immediately placed into a shared tmux session
@@ -40,6 +44,8 @@ As the owner,
 * I want to manage the session (accept/decline/kick) from the launching terminal
 * I don't want users to see or be able to trigger my controls
 * I want the session to end when I disconnect
+* I want my usual editor, shell, and tmux configuration available in the session
+* I want the project's toolchain available so we can build and run what we edit
 * I want the user to share their SSN out-of-band to confirm I am accepting the
   correct user
 
@@ -68,6 +74,8 @@ As a user,
   push-based reintegration
 * A sandbox is an environment where users can modify files freely without
   harming the system (in a NixOS VM)
+    * The sandbox is composed from the owner's system configuration and the
+      project's own toolchain, not a fixed generic image
     * There are no limitations on commands
     * There are no limitations on the network
     * The security is "social" - the owner is watching what the users are doing

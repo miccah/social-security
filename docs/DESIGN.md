@@ -10,7 +10,8 @@ shared, sandboxed pairing session with a "social security" trust model.
 ## 1. Summary
 
 The owner runs one binary in any directory on their dev machine. It boots a NixOS
-VM seeded with a full copy of that directory's contents, opens an ngrok
+VM — composed from the owner's host environment and the project's own toolchain —
+seeded with a full copy of that directory's contents, opens an ngrok
 TCP tunnel, and runs an SSH front door. Guests connect with a stock `ssh` client,
 pick a username, enter an SSN (an out-of-band matching token, not a validated
 secret), and wait for the owner to accept. Accepted guests are bridged into a
@@ -28,6 +29,10 @@ the VM is snapshotted for 7 days.
 - The project is any directory (git optional); reintegration writes the working
   directory back to the host, and additionally `git push`es when a remote exists.
 - Session ends when the owner disconnects (including transient drops).
+- The sandbox carries the project's own toolchain (from its flake) so pairs can
+  build, run, and test with the project's compilers, LSPs, and tools.
+- The sandbox reuses the owner's host environment (editor, shell, tmux) so the
+  shared session feels native rather than generic.
 
 **Non-goals**
 - Defending against a malicious *accepted* guest (trust is social).
@@ -43,7 +48,9 @@ the VM is snapshotted for 7 days.
 | Public ingress     | `golang.ngrok.com/ngrok/v2`              | TCP endpoint as a `net.Listener`, no separate `ngrok` process. |
 | Control plane      | `charmbracelet/bubbletea`                | Interactive control UI in the launching terminal: connect strings, status, accept/decline/kick (host-side; guests never see it). |
 | Sandbox            | NixOS VM (QEMU/KVM)                       | "No command limits without harming host" needs true VM isolation. |
-| VM definition      | this repo's flake (`nixosConfigurations`)| Reuse the existing flake; `microvm.nix`/`nixos-generators` for fast boot. |
+| VM base            | this repo's flake (`nixosConfigurations`)| Stable base module: sshd, tmux, keys, firewall-off. `microvm.nix`/`nixos-generators` if cold-boot is slow. |
+| Owner environment  | host NixOS program modules               | Reuse the owner's editor/shell/tmux so the session is native, not generic. |
+| Project toolchain  | project flake `devShell` (`nix develop`/direnv) | Per-project compilers/LSPs; host Nix store shared over 9p keeps it fast. |
 | Shared shell       | `tmux` inside the VM                      | Shared read/write session; owner-detach = session end. |
 
 ## 4. High-level architecture
@@ -98,9 +105,11 @@ connect to — so it is both invisible to guests and unreachable by them.
 
 - **cmd/sssh** — entrypoint. Resolves the working directory (the project), wires the
   managers, owns the top-level context and graceful teardown.
-- **VM manager** — builds/boots the NixOS VM, waits for sshd readiness, seeds the
-  working dir (full copy) plus optional git creds, writes the dir back
-  to the host on teardown, snapshots the VM, GCs snapshots older than 7 days.
+- **VM manager** — builds/boots the NixOS VM (composed from the base module, the
+  owner's host environment modules, and — when the project has a flake — its
+  `devShell` entered via `nix develop`), waits for sshd readiness, seeds the working
+  dir (full copy) plus optional git creds, writes the dir back to the host on
+  teardown, snapshots the VM, GCs snapshots older than 7 days.
 - **Tunnel manager** — creates the ngrok TCP listener, surfaces the public address to
   the control plane, closes on teardown.
 - **SSH front door (wish)** — two listeners: ngrok (guests) and LAN (owner). Runs the
@@ -280,13 +289,33 @@ reconnect as a fresh pending request.
 
 ## 9. Sandbox / VM
 
-- **Definition:** extend this repo's flake with a `nixosConfiguration` for the sandbox
-  (sshd, tmux, git, dev tools). Boot via QEMU/KVM. Evaluate `microvm.nix` or
-  `nixos-generators` if cold-boot latency is too high. The image comes from *sssh's own
-  flake*, prebuilt and pinned at build time (a known store path or bundled artifact) —
-  it is independent of the project directory and is never evaluated from `$PWD`, so a
-  project that is a plain dir, a git repo, or its own flake all boot the identical
-  sandbox.
+The sandbox is **composed**, not a fixed image. It is assembled from three layers,
+the base applied last so its security-critical settings win:
+
+1. **Base** (`sandbox/configuration.nix`) — sshd (key-only), the `pairing` tmux
+   service, authorized-keys staging, firewall off. Always present; overrides the
+   layers below where they collide (`lib.mkForce`).
+2. **Owner environment** — the owner's host editor/shell/tmux configuration, so the
+   shared session uses the owner's real setup rather than a generic one.
+3. **Project toolchain** — when the project defines a flake `devShell`, the pairing
+   panes run inside it, so compilers, LSPs, and tests match the project.
+
+- **Base + owner environment.** The host is NixOS; its editor/shell/tmux live in
+  declarative modules (`programs.neovim`, `programs.tmux`, `programs.zsh`), not
+  dotfiles. The sandbox `nixosConfiguration` imports those modules — only the
+  environment layer, never the host's bootloader, hardware, users, or secrets. It
+  imports the host paths directly for now; factoring that layer into a module shared
+  by host and sandbox is a separate, non-blocking goal (PLAN §Side goals). Boot via
+  QEMU/KVM; evaluate `microvm.nix`/`nixos-generators` if cold-boot latency is too high.
+- **Project toolchain.** The VM base stays stable across projects; only the shell
+  environment varies. `qemu-vm.nix` shares the host Nix store over 9p, so anything the
+  owner has already built (`nix develop`/direnv) resolves instantly in the VM; only
+  uncached inputs build at session start. The pairing panes enter the project's dev
+  environment via `nix develop` / a `use flake` `.envrc` (the host already standardizes
+  on `direnv`). A project with no flake falls back to the base tools.
+- **Trust.** Only the owner's own project is ever evaluated — nothing a guest supplies
+  is. The project pins its own nixpkgs, independent of sssh's flake, so inheriting the
+  flake is faithful.
 - **Project seeding:** copy the entire working directory into the VM verbatim. No host
   mount → the VM stays isolated during the session.
 - **Reintegration:** on teardown, write the VM's working directory back to the host.
@@ -321,8 +350,9 @@ reconnect as a fresh pending request.
    interactive prompt; confirm.
 3. **SSN semantics.** Purely displayed for out-of-band matching — any format/length
    rules? What if two pending requests share an SSN?
-4. **VM boot latency.** Cold-booting NixOS per session may take tens of seconds. Is that
-   acceptable, or do we pre-warm / use microVMs?
+4. **VM boot latency.** Cold-booting NixOS per session may take tens of seconds, and the
+   first uncached `nix develop` for a project adds to that. Is that acceptable, or do we
+   pre-warm / use microVMs / prebuild the project devShell?
 5. **Host ⇄ VM bridge.** `ssh into VM` (recommended) vs. virtio console vs. sharing the
    tmux socket over virtiofs. Confirm ssh-into-VM.
 6. **Project capture size.** Copy-all is simple but can be huge (build artifacts,
@@ -340,4 +370,11 @@ reconnect as a fresh pending request.
 12. **Snapshot storage.** Where do 7-day snapshots live, and what's the disk budget?
 13. **Join-request expiry.** If the owner is heads-down, should a pending request
     auto-expire (and notify the guest) after a timeout, or wait indefinitely?
+14. **nixpkgs skew.** The host is channel-based; sssh is a flake pinned to `nixos-26.05`.
+    Importing host modules risks evaluating against two nixpkgs. Match versions, or
+    resolve via the shared-module side goal (PLAN §Side goals).
+15. **Import boundary.** How much of the host config to inherit — just the editor/shell/
+    tmux program modules, or the whole home-manager user? Where is the line drawn?
+16. **Non-NixOS owner.** Owner-environment inheritance assumes a NixOS host. What is the
+    fallback (dotfile copy? base tools only?) for a non-NixOS owner?
 ```

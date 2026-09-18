@@ -26,19 +26,32 @@ be considered done. A milestone is complete only when every box is checked.
 
 ## M1 — Sandbox VM
 
-**Goal:** prove the sandbox — the highest-unknown work, done first.
+**Goal:** prove the sandbox — the highest-unknown work, done first. The sandbox is
+composed (base + owner environment + project toolchain), not a fixed image (DESIGN §9).
 
-- [ ] The sandbox `nixosConfiguration` builds from **sssh's own flake** — prebuilt and
-      pinned at build time, never evaluated from the project directory / `$PWD` — and
-      includes sshd, tmux, git, and the baseline dev tools on `$PATH`.
-- [ ] A project directory with no flake (plain dir or git repo) boots the identical
-      sandbox.
+**Base**
+- [ ] The sandbox `nixosConfiguration` builds from **sssh's own flake** and provides the
+      base layer — sshd (key-only), tmux, git, the `pairing` session — whose security
+      settings override the layers below where they collide.
 - [ ] The VM boots via QEMU/KVM and sshd is reachable only on the host-only NIC
       (not on any public or LAN interface).
 - [ ] The VM manager blocks until sshd accepts a connection, with a bounded timeout
       that returns a clear error on failure.
 - [ ] A `pairing` tmux session exists in the VM; `ssh <vm> tmux attach -t pairing`
       from the host attaches to it.
+
+**Owner environment**
+- [ ] The sandbox imports the owner's host program modules (editor, shell, tmux) and
+      only those — never the host's bootloader, hardware, users, or secrets.
+- [ ] The shared session presents the owner's real editor/shell/tmux configuration,
+      not a generic default.
+
+**Project toolchain**
+- [ ] A project with a flake `devShell` boots its panes inside that shell (`nix develop`
+      / a `use flake` `.envrc`); its compilers and LSPs are on `$PATH`.
+- [ ] The host Nix store is shared into the VM, so an already-built dev environment
+      resolves without a rebuild; only uncached inputs build at session start.
+- [ ] A project with no flake falls back to the base tools and still boots.
 
 ## M2 — Local shared session
 
@@ -127,3 +140,22 @@ be considered done. A milestone is complete only when every box is checked.
 - [ ] A project exceeding the size cap is refused (or explicitly opted past) with a
       clear message.
 - [ ] Each resolved open question in §11 is reflected back into `DESIGN.md`.
+
+---
+
+## Side goals (non-blocking)
+
+These improve the design but are not on the M0–M8 critical path; the milestones above
+work without them.
+
+### S1 — Shared host environment module
+
+Factor the environment layer of `/etc/nixos` (`programs.neovim`, `programs.tmux`,
+`programs.zsh`, the home-manager user module) into a standalone module imported by both
+the host system and the sandbox (DESIGN §9). M1 imports the host paths directly in the
+meantime; this removes the path coupling and the two-nixpkgs concern (DESIGN §11.14).
+
+- [ ] The editor/shell/tmux configuration lives in one module imported by both
+      `/etc/nixos` and the sandbox.
+- [ ] The sandbox no longer references `/etc/nixos` paths directly.
+- [ ] Host and sandbox evaluate that environment against a single nixpkgs.
