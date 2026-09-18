@@ -11,11 +11,23 @@ package bridge
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
+	"time"
+
+	"github.com/charmbracelet/ssh"
+	gossh "golang.org/x/crypto/ssh"
+
+	"github.com/miccah/social-security/internal/vm"
 )
 
-// errNotImplemented marks the stub so an accidental early call fails loudly
-// instead of silently succeeding.
-var errNotImplemented = errors.New("bridge: not implemented")
+// attachCmd joins the shared pairing session. new-session -A attaches when the
+// session exists and creates it otherwise, so a connection that races the VM's
+// pairing service still lands in the same shared session.
+const attachCmd = "tmux new-session -A -s pairing"
+
+// dialTimeout bounds the host to guest ssh dial.
+const dialTimeout = 10 * time.Second
 
 // Bridge connects a single accepted session to the VM's shared tmux.
 type Bridge interface {
@@ -24,11 +36,89 @@ type Bridge interface {
 	Run(ctx context.Context) error
 }
 
-// stub is the no-op implementation.
-type stub struct{}
+type bridge struct {
+	target  vm.Target
+	session ssh.Session
+}
 
-// New returns a no-op bridge; wiring it to the VM's tmux over host-only ssh is
-// not implemented yet.
-func New() Bridge { return &stub{} }
+// New returns a bridge that attaches the guest session to the VM's pairing tmux.
+func New(target vm.Target, s ssh.Session) Bridge {
+	return &bridge{target: target, session: s}
+}
 
-func (s *stub) Run(context.Context) error { return errNotImplemented }
+func (b *bridge) Run(ctx context.Context) error {
+	cfg := &gossh.ClientConfig{
+		User: b.target.User,
+		Auth: []gossh.AuthMethod{gossh.PublicKeys(b.target.Signer)},
+		// The guest sshd is our own VM behind a loopback forward with an ephemeral
+		// host key, so there is nothing to pin.
+		HostKeyCallback: gossh.InsecureIgnoreHostKey(),
+		Timeout:         dialTimeout,
+	}
+	client, err := gossh.Dial("tcp", b.target.Addr, cfg)
+	if err != nil {
+		return fmt.Errorf("dial sandbox ssh: %w", err)
+	}
+	defer client.Close()
+
+	sess, err := client.NewSession()
+	if err != nil {
+		return fmt.Errorf("open sandbox session: %w", err)
+	}
+	defer sess.Close()
+
+	// done bounds the helper goroutines to Run's lifetime.
+	done := make(chan struct{})
+	defer close(done)
+
+	// Mirror the guest's terminal so tmux renders correctly, and forward resizes.
+	if pty, winCh, ok := b.session.Pty(); ok {
+		if err := sess.RequestPty(pty.Term, pty.Window.Height, pty.Window.Width, gossh.TerminalModes{}); err != nil {
+			return fmt.Errorf("request sandbox pty: %w", err)
+		}
+		go func() {
+			for {
+				select {
+				case <-done:
+					return
+				case w, ok := <-winCh:
+					if !ok {
+						return
+					}
+					sess.WindowChange(w.Height, w.Width)
+				}
+			}
+		}()
+	}
+
+	sess.Stdin = b.session
+	sess.Stdout = b.session
+	sess.Stderr = b.session.Stderr()
+
+	if err := sess.Start(attachCmd); err != nil {
+		return fmt.Errorf("start pairing attach: %w", err)
+	}
+
+	// Close the guest-facing session when the connection is cancelled (owner
+	// teardown or kick) so Wait can't block on a dead client.
+	go func() {
+		select {
+		case <-ctx.Done():
+			sess.Close()
+		case <-done:
+		}
+	}()
+
+	// A detach, a closed connection, or a cancelled context all end the session
+	// normally; only an unexpected transport error is worth surfacing.
+	err = sess.Wait()
+	if err == nil || ctx.Err() != nil {
+		return nil
+	}
+	var exitErr *gossh.ExitError
+	var missingErr *gossh.ExitMissingError
+	if errors.As(err, &exitErr) || errors.As(err, &missingErr) || errors.Is(err, io.EOF) {
+		return nil
+	}
+	return fmt.Errorf("pairing session: %w", err)
+}

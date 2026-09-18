@@ -21,9 +21,9 @@
   environment.etc."tmux.conf".source = hostConfig.environment.etc."tmux.conf".source;
 
   # The owner's system-level zsh: a valid login shell (so the nix directories
-  # stay on PATH) carrying the owner's interactive config. Personal home-manager
-  # dotfiles are not reproduced here (that needs the owner's home config, which
-  # is out of scope until the S1 shared module lands).
+  # stay on PATH) carrying the owner's interactive config. Only system-level
+  # configuration is borrowed; the owner's personal home-manager dotfiles are
+  # not reproduced here.
   users.users.root.shell = pkgs.zsh;
   programs.zsh = {
     enable = true;

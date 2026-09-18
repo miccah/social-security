@@ -19,6 +19,8 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/crypto/ssh"
+
 	"github.com/miccah/social-security/internal/lifecycle"
 )
 
@@ -38,9 +40,20 @@ const vmUser = "root"
 // bootTimeout bounds how long Start waits for the guest sshd to answer.
 const bootTimeout = 2 * time.Minute
 
+// Target is how to reach the sandbox VM's sshd over the host loopback forward.
+type Target struct {
+	Addr   string     // host:port on loopback that forwards to the guest sshd
+	User   string     // login user inside the guest
+	Signer ssh.Signer // session key authorized in the guest
+}
+
 // Manager builds, boots, and tears down the sandbox VM.
 type Manager interface {
 	lifecycle.Manager
+
+	// Target returns how to reach the guest sshd. It is valid only after Start
+	// has returned successfully.
+	Target() (Target, error)
 }
 
 // manager boots one sandbox VM under QEMU and holds the handle the rest of sssh
@@ -52,6 +65,7 @@ type manager struct {
 	// 9p key share, and the console log. Removed on Stop.
 	runtimeDir string
 	keyPath    string
+	signer     ssh.Signer
 	port       int
 	proc       *os.Process
 	// exited is closed when the QEMU process ends, so the boot wait can fail
@@ -171,7 +185,30 @@ func (m *manager) generateKey(ctx context.Context) error {
 	if err := os.WriteFile(filepath.Join(shareDir, "authorized_keys"), pub, 0o644); err != nil {
 		return fmt.Errorf("write authorized_keys: %w", err)
 	}
+
+	// Parse the private half into a signer the bridge uses to ssh into the guest.
+	priv, err := os.ReadFile(m.keyPath)
+	if err != nil {
+		return fmt.Errorf("read private key: %w", err)
+	}
+	m.signer, err = ssh.ParsePrivateKey(priv)
+	if err != nil {
+		return fmt.Errorf("parse private key: %w", err)
+	}
 	return nil
+}
+
+// Target returns the loopback address, user, and signer the bridge uses to reach
+// the guest sshd. It errors until Start has booted the VM and generated the key.
+func (m *manager) Target() (Target, error) {
+	if m.port == 0 || m.signer == nil {
+		return Target{}, errors.New("vm: sandbox not started")
+	}
+	return Target{
+		Addr:   fmt.Sprintf("127.0.0.1:%d", m.port),
+		User:   vmUser,
+		Signer: m.signer,
+	}, nil
 }
 
 // launch starts the QEMU run script. The script boots the guest, forwards
@@ -270,6 +307,9 @@ func (m *manager) teardown() {
 		os.RemoveAll(m.runtimeDir)
 		m.runtimeDir = ""
 	}
+	// Invalidate the target so a post-Stop bridge attempt fails cleanly.
+	m.port = 0
+	m.signer = nil
 }
 
 // cmdErr enriches an exec error with captured stderr when available.
