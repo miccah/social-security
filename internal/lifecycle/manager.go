@@ -15,9 +15,8 @@ import "context"
 // block on a single signal, rather than one Start call stalling the whole boot.
 //
 // Stop must be safe to call even when Start failed partway, because teardown
-// runs over whatever managed to start. Its context carries the shutdown
-// deadline — distinct from the already-cancelled root context — so cleanup can
-// still do bounded work while the process is shutting down.
+// runs over whatever managed to start. It should be called with a distinct
+// context from Start to allow bounded cleanup work.
 type Manager interface {
 	// Name identifies the manager in startup and teardown logs.
 	Name() string

@@ -3,9 +3,6 @@
 // connected/waiting counts and the pending request list, and handles
 // accept/decline/kick. It runs as a separate host-side process that guests never
 // connect to, so it is invisible to and unreachable by them.
-//
-// This is currently a no-op stub; the Bubble Tea UI and its wiring to the
-// registry are not implemented yet.
 package control
 
 import (
@@ -21,9 +18,8 @@ type Plane interface {
 	lifecycle.Manager
 }
 
-// stub is the no-op implementation. It already takes the registry so the
-// dependency direction is fixed now: the control plane reads state from and
-// resolves join requests against the registry, never the reverse.
+// stub is the no-op implementation. The plane takes the registry so it can
+// read state and resolves join requests against it.
 type stub struct {
 	reg registry.Registry
 }

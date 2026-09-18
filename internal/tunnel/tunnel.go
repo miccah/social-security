@@ -1,8 +1,6 @@
 // Package tunnel manages the public ingress: an ngrok TCP endpoint exposed as a
 // net.Listener on the host. It surfaces the public address to the control plane
 // and closes on teardown. ngrok is the only public path to the front door.
-//
-// This is currently a no-op stub; the ngrok listener is not implemented yet.
 package tunnel
 
 import (

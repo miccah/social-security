@@ -1,13 +1,11 @@
 // Package bridge pipes one accepted connection's PTY to the VM's shared tmux
-// session over the host-only network — effectively
+// session over the host-only network, effectively
 // `ssh -t <vm> tmux attach -t pairing`. The front door creates one bridge per
 // accepted guest and tears it down on kick or teardown.
 //
 // Unlike the other subsystems a bridge is per-connection, not a long-lived
 // managed service, so it is deliberately not part of the entrypoint's
 // startup/teardown set.
-//
-// This is currently a no-op stub; the real pipe is not implemented yet.
 package bridge
 
 import (

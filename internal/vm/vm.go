@@ -2,9 +2,6 @@
 // sssh's own flake, waits for sshd on the host-only NIC, seeds the project
 // directory, writes it back on teardown, snapshots the disk, and GCs snapshots
 // older than 7 days.
-//
-// This is currently a no-op stub; booting via QEMU/KVM, seeding, write-back,
-// and snapshotting are not implemented yet.
 package vm
 
 import (

@@ -1,11 +1,7 @@
-// Package frontdoor is the SSH front door: a wish server with two listeners —
-// ngrok for guests and loopback/LAN for the owner. It runs the join ceremony,
-// then bridges accepted sessions into the VM's shared tmux. Guests only ever
-// touch this front door; they never get a host shell, so everything they can
-// run stays confined to the VM.
-//
-// This is currently a no-op stub; the listeners, bridge, and join ceremony are
-// not implemented yet.
+// Package frontdoor is the SSH front door. It is a wish server with two
+// listeners: ngrok for guests and loopback/LAN for the owner. It runs the join
+// ceremony, then bridges accepted sessions into the VM's shared tmux. Guests
+// only ever touch this front door.
 package frontdoor
 
 import (

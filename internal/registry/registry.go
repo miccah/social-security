@@ -1,11 +1,6 @@
-// Package registry holds sssh's session state — pending join requests, active
+// Package registry holds sssh's session state: pending join requests, active
 // guests, and owner presence. It is the single source of truth the front door
 // and control plane coordinate through.
-//
-// This is currently a no-op stub so the entrypoint can wire it like any other
-// managed subsystem. The concurrency-safe state and the decision-channel
-// rendezvous between the control plane and blocked front-door handlers are not
-// implemented yet.
 package registry
 
 import (
