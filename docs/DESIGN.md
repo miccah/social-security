@@ -10,7 +10,7 @@ shared, sandboxed pairing session with a "social security" trust model.
 ## 1. Summary
 
 The owner runs one binary in any directory on their dev machine. It boots a NixOS
-VM seeded with that directory's contents (respecting `.gitignore`), opens an ngrok
+VM seeded with a full copy of that directory's contents, opens an ngrok
 TCP tunnel, and runs an SSH front door. Guests connect with a stock `ssh` client,
 pick a username, enter an SSN (an out-of-band matching token, not a validated
 secret), and wait for the owner to accept. Accepted guests are bridged into a
@@ -33,7 +33,6 @@ the VM is snapshotted for 7 days.
 - Defending against a malicious *accepted* guest (trust is social).
 - Credential exfiltration by an accepted guest (explicitly out of threat model).
 - Multi-host / multi-owner / horizontal scale.
-- Copying files excluded by `.gitignore` into the sandbox.
 
 ## 3. Tech stack
 
@@ -42,8 +41,7 @@ the VM is snapshotted for 7 days.
 | Language           | Go                                       | Matches `wish` + `ngrok-go`; single static binary. |
 | SSH front door     | `charmbracelet/wish`                     | SSH server as middleware; PTY handling; accept any username. |
 | Public ingress     | `golang.ngrok.com/ngrok/v2`              | TCP endpoint as a `net.Listener`, no separate `ngrok` process. |
-| Control overlay    | `charmbracelet/bubbletea`                | Private control UI + status line composited into the owner's front-door PTY (host-side; guests never see it). |
-| Launcher output    | plain stdout                             | Launching terminal is a daemon: connect strings + status log, not interactive. |
+| Control plane      | `charmbracelet/bubbletea`                | Interactive control UI in the launching terminal: connect strings, status, accept/decline/kick (host-side; guests never see it). |
 | Sandbox            | NixOS VM (QEMU/KVM)                       | "No command limits without harming host" needs true VM isolation. |
 | VM definition      | this repo's flake (`nixosConfigurations`)| Reuse the existing flake; `microvm.nix`/`nixos-generators` for fast boot. |
 | Shared shell       | `tmux` inside the VM                      | Shared read/write session; owner-detach = session end. |
@@ -61,12 +59,12 @@ flowchart LR
 
         subgraph FD["SSH front door (wish)"]
             FG["guest path:<br/>prompt username + SSN,<br/>register pending request"]
-            FO["owner path:<br/>private control overlay + status line,<br/>intercepts control key before VM tmux"]
+            FO["owner path:<br/>recognize owner (LAN),<br/>bridge to VM tmux"]
             BR["bridge PTY to VM tmux<br/>(all accepted connections)"]
         end
 
         REG["session registry<br/>pending / active / owner presence"]
-        DMN["daemon / status log<br/>(launching terminal)<br/>connect strings + live counts"]
+        DMN["control plane<br/>(launching terminal)<br/>connect strings + status + accept/decline/kick"]
         TUN["tunnel manager<br/>ngrok lifecycle"]
         VMM["VM manager<br/>boot / snapshot 7d / destroy"]
 
@@ -82,7 +80,7 @@ flowchart LR
     O -->|LAN| LN --> FO
     FG <--> REG
     FO <--> REG
-    REG --> DMN
+    REG <--> DMN
     FG --> BR
     FO --> BR
     BR -->|host-only ssh| SSHD
@@ -93,31 +91,28 @@ flowchart LR
 **Trust boundary:** the wish front door on the host is the only thing guests touch on
 the host. Guests never get a host shell — the bridge only ever attaches them to tmux
 *inside the VM*. Everything a guest can run is confined to the VM. The owner's control
-overlay is composited on the host, *inside the owner's front-door PTY* — never in the
-VM tmux — so it is both invisible to guests and unreachable by them.
+plane runs in the launching terminal — a separate host-side process guests never
+connect to — so it is both invisible to guests and unreachable by them.
 
 ## 5. Components
 
 - **cmd/sssh** — entrypoint. Resolves the working directory (the project), wires the
   managers, owns the top-level context and graceful teardown.
 - **VM manager** — builds/boots the NixOS VM, waits for sshd readiness, seeds the
-  working dir (respecting `.gitignore`) plus optional git creds, writes the dir back
+  working dir (full copy) plus optional git creds, writes the dir back
   to the host on teardown, snapshots the VM, GCs snapshots older than 7 days.
 - **Tunnel manager** — creates the ngrok TCP listener, surfaces the public address to
-  the daemon/status log, closes on teardown.
+  the control plane, closes on teardown.
 - **SSH front door (wish)** — two listeners: ngrok (guests) and LAN (owner). Runs the
   join ceremony, produces `net.Conn`/PTY, and bridges accepted sessions into the VM.
-  For the owner connection it also recognizes the owner, watches the input stream for
-  the control key (intercepting it before the VM tmux), and composites the control
-  overlay + status line.
+  The owner connection is recognized by LAN origin and bridged into the VM tmux like
+  any other session — no in-band interception; management lives in the control plane.
 - **Session registry** — concurrency-safe in-memory state (pending requests, active
-  users, owner presence). Single source of truth; emits events to the overlay and the
-  daemon/status log.
-- **Control overlay** — the owner's private control surface, composited into the
-  owner's front-door PTY (host-side): status line (ambient counts), request list, and
-  accept/decline/kick actions. Never rendered into the VM tmux.
-- **Daemon / status log** — the launching terminal: prints the guest and owner connect
-  strings and a running status log. Not interactive.
+  users, owner presence). Single source of truth; emits events to the control plane.
+- **Control plane** — the launching terminal (host-side, interactive): prints the
+  guest and owner connect strings, shows connected/waiting counts and the pending
+  request list, and handles accept/decline/kick. A separate process guests never
+  connect to.
 - **Bridge** — pipes an accepted guest's PTY to `ssh -t <vm> tmux attach -t pairing`
   over the host-only network; tears the pipe down on kick/teardown.
 
@@ -130,7 +125,7 @@ sequenceDiagram
     participant G as Guest (ssh)
     participant F as Front door (wish)
     participant R as Registry
-    participant T as Control overlay
+    participant T as Control plane
     participant O as Owner
     participant V as VM (tmux)
 
@@ -197,31 +192,30 @@ stateDiagram-v2
 
 ### 6.4 Owner control surface (UX)
 
-The owner lives in **one interactive surface** — their front-door SSH session — which
-unifies coding and control. The launching terminal is a fire-and-forget daemon.
+The owner has two surfaces: the **launching terminal (Terminal A)** is the interactive
+control plane; the owner's **SSH session (Terminal B)** is the shared editor. Control
+and code are cleanly separated — no in-band key interception, nothing painted over the
+editor.
 
-1. **Launch (Terminal A, daemon).** `sssh` in the project dir boots the VM, opens the
-   tunnel, and prints two connect strings (guest + owner) plus a status log. Not
-   interactive.
-2. **Enter (Terminal B, the session).** The owner runs the printed `ssh` command over
-   loopback/LAN. The front door recognizes the owner and drops them into the shared VM
-   tmux, with a thin **status line** the front door paints below it (host-side; guests
-   never see it):
+1. **Launch (Terminal A, control plane).** `sssh` in the project dir boots the VM,
+   opens the tunnel, and prints two connect strings (guest + owner). It stays
+   interactive as the control plane: status (connected/waiting counts) plus the pending
+   request list the owner acts on.
+2. **Enter (Terminal B, the session).** In another terminal the owner runs the printed
+   `ssh` command over loopback/LAN. The front door recognizes the owner by LAN origin
+   and drops them straight into the shared VM tmux — nothing painted over it; owner and
+   guests see the same screen.
 
    ```
    ┌ shared tmux (everyone mirrored) ────────────────────────┐
    │ $ vim main.go                                           │
    │ …                                                       │
-   ├─────────────────────────────────────────────────────────┤
-   │ sssh ● 2 connected · 1 waiting            ^X = control  │
    └─────────────────────────────────────────────────────────┘
    ```
-3. **A request arrives (ambient, not modal).** A guest connects and enters username +
-   SSN. The status line updates (`1 waiting: bob`) with a soft bell — the owner's
-   terminal is never stolen mid-keystroke.
-4. **Act.** The owner presses the control key, which the front door grabs from the raw
-   stream *before* it reaches the VM tmux. A private overlay drops over the owner's view
-   only:
+3. **A request arrives (ambient).** A guest connects and enters username + SSN.
+   Terminal A's status updates (`1 waiting: bob`) with a soft bell; Terminal B's editor
+   is untouched.
+4. **Act (Terminal A).** The owner switches to the control plane:
 
    ```
    ┌ sssh control ───────────────────────────────┐
@@ -230,18 +224,18 @@ unifies coding and control. The launching terminal is a fire-and-forget daemon.
    │ connected                                    │
    │    alice   idle 0:12                         │
    │    carol   active                            │
-   │ [a]ccept  [d]ecline  [k]ick  [esc] close     │
+   │ [a]ccept  [d]ecline  [k]ick  [q]uit          │
    └──────────────────────────────────────────────┘
    ```
 
-   The owner confirms bob's SSN out-of-band, presses `a`; the overlay closes and bob is
-   bridged into the shared session.
-5. **End.** The owner detaches/quits Terminal B (or quits from the overlay). Front door
-   sees the owner connection close → teardown (§6.2).
+   The owner confirms bob's SSN out-of-band, presses `a`; bob is bridged into the shared
+   session.
+5. **End.** The owner disconnects Terminal B (detach/quit) or quits the control plane in
+   Terminal A → teardown (§6.2).
 
-**Design commitments:** requests are ambient (never modal); the control key is
-front-door-intercepted so it cannot clash with tmux's own prefix; and the overlay is
-host-side, so it is invisible to guests and unreachable by them (§4 trust boundary).
+**Design commitments:** control lives in a separate process (the launching terminal), so
+it never competes with tmux for keystrokes or paints over the shared editor, and it is
+both invisible to guests and unreachable by them (§4 trust boundary).
 
 ## 7. Session registry (state)
 
@@ -288,11 +282,13 @@ reconnect as a fresh pending request.
 
 - **Definition:** extend this repo's flake with a `nixosConfiguration` for the sandbox
   (sshd, tmux, git, dev tools). Boot via QEMU/KVM. Evaluate `microvm.nix` or
-  `nixos-generators` if cold-boot latency is too high.
-- **Project seeding:** copy the working directory into the VM, respecting `.gitignore`
-  when present (skips ignored build artifacts, secrets, `node_modules`, etc.); if the
-  directory isn't a git repo and has no `.gitignore`, copy it wholesale. No host mount
-  → the VM stays isolated during the session.
+  `nixos-generators` if cold-boot latency is too high. The image comes from *sssh's own
+  flake*, prebuilt and pinned at build time (a known store path or bundled artifact) —
+  it is independent of the project directory and is never evaluated from `$PWD`, so a
+  project that is a plain dir, a git repo, or its own flake all boot the identical
+  sandbox.
+- **Project seeding:** copy the entire working directory into the VM verbatim. No host
+  mount → the VM stays isolated during the session.
 - **Reintegration:** on teardown, write the VM's working directory back to the host.
   Land it in a sibling `sssh-out/` rather than clobbering the source in place (open q.).
   If the project is a git repo with a remote, `git push` is additionally available
@@ -320,31 +316,28 @@ reconnect as a fresh pending request.
    we need a one-time token printed at startup? On a shared LAN, anyone could reach the
    LAN listener. Simplest hardening: bind owner listener to loopback + require the
    startup token.
-2. **Control key.** Which keystroke does the front door intercept for the overlay? It
-   must avoid tmux's prefix and terminal flow-control (`^S`/`^Q`) — candidates like
-   `^X`, a rarely used prefix, or `F9`. Make it configurable?
-3. **Username source.** Interactive prompt (allows reprompt on collision, per PRD line
-   16) vs. the SSH username (`ssh alice@endpoint`, but collision means reconnect). Design
-   assumes interactive prompt; confirm.
-4. **SSN semantics.** Purely displayed for out-of-band matching — any format/length
+2. **Username source.** Interactive prompt (allows reprompt on collision, per PRD) vs.
+   the SSH username (`ssh alice@endpoint`, but collision means reconnect). Design assumes
+   interactive prompt; confirm.
+3. **SSN semantics.** Purely displayed for out-of-band matching — any format/length
    rules? What if two pending requests share an SSN?
-5. **VM boot latency.** Cold-booting NixOS per session may take tens of seconds. Is that
+4. **VM boot latency.** Cold-booting NixOS per session may take tens of seconds. Is that
    acceptable, or do we pre-warm / use microVMs?
-6. **Host ⇄ VM bridge.** `ssh into VM` (recommended) vs. virtio console vs. sharing the
+5. **Host ⇄ VM bridge.** `ssh into VM` (recommended) vs. virtio console vs. sharing the
    tmux socket over virtiofs. Confirm ssh-into-VM.
-7. **Project capture fidelity.** `.gitignore` is the copy boundary, but edge cases remain:
-   non-git dirs with no `.gitignore` (copy-all could be huge), symlinks, submodules, and a
-   size cap to refuse pathological trees.
-8. **Write-back target.** Land the returned working dir in a sibling `sssh-out/` (safe, but
+6. **Project capture size.** Copy-all is simple but can be huge (build artifacts,
+   `node_modules`, VM images) and hits edge cases: symlinks, submodules, and pathological
+   trees. Do we need a size cap or any opt-out?
+7. **Write-back target.** Land the returned working dir in a sibling `sssh-out/` (safe, but
    the owner must merge) or back in place (convenient, but clobbers host edits made during
    the session)? How are conflicts surfaced?
-9. **Terminal sizing.** A shared session clamps all clients to the smallest terminal.
+8. **Terminal sizing.** A shared session clamps all clients to the smallest terminal.
    Acceptable for pairing, or do we want per-client windows (drops the single-screen model)?
-10. **Concurrency limit.** Max simultaneous guests?
-11. **Host-key churn.** Ephemeral ngrok address ⇒ guests get SSH host-key warnings each
+9. **Concurrency limit.** Max simultaneous guests?
+10. **Host-key churn.** Ephemeral ngrok address ⇒ guests get SSH host-key warnings each
     session. Ship a persistent host key + a note in the connect instructions?
-12. **Tunnel-drop policy.** Re-listen and keep the session, or treat as teardown?
-13. **Snapshot storage.** Where do 7-day snapshots live, and what's the disk budget?
-14. **Join-request expiry.** If the owner is heads-down, should a pending request
+11. **Tunnel-drop policy.** Re-listen and keep the session, or treat as teardown?
+12. **Snapshot storage.** Where do 7-day snapshots live, and what's the disk budget?
+13. **Join-request expiry.** If the owner is heads-down, should a pending request
     auto-expire (and notify the guest) after a timeout, or wait indefinitely?
 ```
