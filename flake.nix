@@ -14,7 +14,9 @@
   in {
     devShells.${system}.default = pkgs.mkShell {
       packages = with pkgs; [
-        # Add packages here.
+        # Go toolchain for cmd/sssh and internal/*.
+        go
+        gopls
       ];
     };
   };
