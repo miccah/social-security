@@ -1,8 +1,8 @@
-# Project-toolchain layer: the project directory is shared into the guest read
-# only, and every pairing pane enters its flake dev environment via `nix
-# develop`. A project with no flake falls back to the owner's login shell. The
-# host Nix store is shared by qemu-vm.nix, so inputs the owner has already built
-# resolve without a rebuild.
+# Project-toolchain layer: the host project directory is mounted into the guest
+# read/write, and every pairing pane enters its flake dev environment via `nix
+# develop`. Edits are live on the host. A project with no flake falls back to the
+# owner's login shell. The host Nix store is shared by qemu-vm.nix, so inputs the
+# owner has already built resolve without a rebuild.
 { pkgs, ... }:
 
 let
@@ -23,13 +23,15 @@ let
     exec "$shell" -l
   '';
 in {
-  # The manager exports the project over 9p with mount tag "project". nofail
-  # keeps the guest bootable when no project is attached; the pane command then
-  # falls back to the login shell.
-  fileSystems.${projectDir} = {
+  # The manager exports the project over 9p read/write with mount tag "project".
+  # qemu-vm.nix overrides top-level fileSystems with mkVMOverride, so guest mounts
+  # must be declared here under virtualisation.fileSystems. nofail keeps the guest
+  # bootable when no project is attached; the pane command then falls back to the
+  # login shell.
+  virtualisation.fileSystems.${projectDir} = {
     device = "project";
     fsType = "9p";
-    options = [ "trans=virtio" "version=9p2000.L" "ro" "nofail" "x-systemd.device-timeout=5s" ];
+    options = [ "trans=virtio" "version=9p2000.L" "nofail" "x-systemd.device-timeout=5s" ];
   };
 
   # The shared read/write session every client attaches to. Started detached so

@@ -1,8 +1,8 @@
 // Package vm manages the NixOS sandbox VM: it builds and boots a composed VM (a
 // base from sssh's own flake, the owner's editor/shell/tmux borrowed from the
 // host, and the project's flake toolchain entered at session start), waits for
-// sshd on the host-only NIC, seeds the project directory, writes it back on
-// teardown, snapshots the disk, and GCs snapshots older than 7 days.
+// sshd on the host-only NIC, mounts the project directory read/write, snapshots
+// the disk, and GCs snapshots older than 7 days.
 package vm
 
 import (
@@ -176,9 +176,10 @@ func (m *manager) generateKey(ctx context.Context) error {
 
 // launch starts the QEMU run script. The script boots the guest, forwards
 // loopback:port to the guest sshd, shares the key directory into the guest at
-// /tmp/shared via SHARED_DIR, and shares the project read-only over 9p (mount
-// tag "project") so the pairing session can enter its flake dev environment. The
-// process runs until Stop, so it is not tied to the boot context.
+// /tmp/shared via SHARED_DIR, and shares the project read/write over 9p (mount
+// tag "project") so edits land on the host and the pairing session can enter its
+// flake dev environment. The process runs until Stop, so it is not tied to the
+// boot context.
 func (m *manager) launch(runScript string) error {
 	disk := filepath.Join(m.runtimeDir, "sandbox.qcow2")
 	shareDir := filepath.Join(m.runtimeDir, "share")
@@ -195,7 +196,7 @@ func (m *manager) launch(runScript string) error {
 		"NIX_DISK_IMAGE="+disk,
 		fmt.Sprintf("QEMU_NET_OPTS=hostfwd=tcp:127.0.0.1:%d-:22", m.port),
 		"SHARED_DIR="+shareDir,
-		fmt.Sprintf("QEMU_OPTS=-virtfs local,path=%s,mount_tag=project,security_model=none,readonly=on", m.projectDir),
+		fmt.Sprintf("QEMU_OPTS=-virtfs local,path=%s,mount_tag=project,security_model=none", m.projectDir),
 	)
 	cmd.Stdout = console
 	cmd.Stderr = console
