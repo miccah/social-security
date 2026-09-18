@@ -11,13 +11,13 @@ shared, sandboxed pairing session with a "social security" trust model.
 
 The owner runs one binary in any directory on their dev machine. It boots a NixOS
 VM — composed from the owner's host environment and the project's own toolchain —
-seeded with a full copy of that directory's contents, opens an ngrok
+with that directory mounted live from the host, opens an ngrok
 TCP tunnel, and runs an SSH front door. Guests connect with a stock `ssh` client,
 pick a username, enter an SSN (an out-of-band matching token, not a validated
 secret), and wait for the owner to accept. Accepted guests are bridged into a
 shared tmux session running *inside the VM*. When the owner's connection ends,
-everyone is disconnected, the working directory is written back to the host, and
-the VM is snapshotted for 7 days.
+everyone is disconnected and the VM is snapshotted for 7 days; project edits are
+already on the host, since the directory was mounted live.
 
 ## 2. Goals / non-goals
 
@@ -26,8 +26,8 @@ the VM is snapshotted for 7 days.
 - All command execution is sandboxed in a NixOS VM (no command/network limits inside).
 - Shared read/write tmux session for real pair programming.
 - Owner-mediated join (accept/decline) keyed by an out-of-band SSN.
-- The project is any directory (git optional); reintegration writes the working
-  directory back to the host, and additionally `git push`es when a remote exists.
+- The project is any directory (git optional); its directory is mounted live from
+  the host, and `git push` is additionally available when a remote exists.
 - Session ends when the owner disconnects (including transient drops).
 - The sandbox carries the project's own toolchain (from its flake) so pairs can
   build, run, and test with the project's compilers, LSPs, and tools.
@@ -78,7 +78,7 @@ flowchart LR
         subgraph VM["NixOS VM (QEMU/KVM)"]
             SSHD["sshd on host-only iface"]
             TMUX["tmux 'pairing' (shared read/write)"]
-            PROJ["project copy (respects .gitignore)"]
+            PROJ["project mount (live host dir)"]
             NET["NAT egress (no network limits)"]
         end
     end
@@ -107,9 +107,9 @@ connect to — so it is both invisible to guests and unreachable by them.
   managers, owns the top-level context and graceful teardown.
 - **VM manager** — builds/boots the NixOS VM (composed from the base module, the
   owner's host environment modules, and — when the project has a flake — its
-  `devShell` entered via `nix develop`), waits for sshd readiness, seeds the working
-  dir (full copy) plus optional git creds, writes the dir back to the host on
-  teardown, snapshots the VM, GCs snapshots older than 7 days.
+  `devShell` entered via `nix develop`), waits for sshd readiness, mounts the
+  project directory read/write plus optional git creds, snapshots the VM, GCs
+  snapshots older than 7 days.
 - **Tunnel manager** — creates the ngrok TCP listener, surfaces the public address to
   the control plane, closes on teardown.
 - **SSH front door (wish)** — two listeners: ngrok (guests) and LAN (owner). Runs the
@@ -316,17 +316,18 @@ the base applied last so its security-critical settings win:
 - **Trust.** Only the owner's own project is ever evaluated — nothing a guest supplies
   is. The project pins its own nixpkgs, independent of sssh's flake, so inheriting the
   flake is faithful.
-- **Project seeding:** copy the entire working directory into the VM verbatim. No host
-  mount → the VM stays isolated during the session.
-- **Reintegration:** on teardown, write the VM's working directory back to the host.
-  Land it in a sibling `sssh-out/` rather than clobbering the source in place (open q.).
-  If the project is a git repo with a remote, `git push` is additionally available
-  during the session.
+- **Project mount:** mount the host project directory into the VM read/write (9p
+  today; virtiofs if perf or file-watching semantics bite). Edits are live on the
+  host, so there is no copy-in, no write-back, and no `sssh-out/`. This is the
+  deliberate exception to VM isolation: the system is sandboxed, the project
+  directory is shared. If the project is a git repo with a remote, `git push` is
+  additionally available during the session.
 - **Credentials:** when the project is a git repo, owner git creds are placed in the VM
   (per PRD; exfiltration is out of the threat model) so any participant can commit and
   push as they go. Non-git projects need no creds.
 - **Retention:** on teardown, snapshot the VM disk and keep it 7 days; a GC pass on
-  startup removes older snapshots.
+  startup removes older snapshots. The snapshot holds the VM's ephemeral state, not
+  the project source (which lives on the host), so project undo comes from git.
 
 ## 10. Lifecycle & failure handling
 
@@ -355,26 +356,23 @@ the base applied last so its security-critical settings win:
    pre-warm / use microVMs / prebuild the project devShell?
 5. **Host ⇄ VM bridge.** `ssh into VM` (recommended) vs. virtio console vs. sharing the
    tmux socket over virtiofs. Confirm ssh-into-VM.
-6. **Project capture size.** Copy-all is simple but can be huge (build artifacts,
-   `node_modules`, VM images) and hits edge cases: symlinks, submodules, and pathological
-   trees. Do we need a size cap or any opt-out?
-7. **Write-back target.** Land the returned working dir in a sibling `sssh-out/` (safe, but
-   the owner must merge) or back in place (convenient, but clobbers host edits made during
-   the session)? How are conflicts surfaced?
-8. **Terminal sizing.** A shared session clamps all clients to the smallest terminal.
+6. **Project-mount backend.** 9p is wired today; a writable working directory stresses
+   mmap, file locking, and inotify (watchers, LSPs) and is slow on metadata. Move to
+   virtiofs (needs a `virtiofsd` per session), or is 9p good enough?
+7. **Terminal sizing.** A shared session clamps all clients to the smallest terminal.
    Acceptable for pairing, or do we want per-client windows (drops the single-screen model)?
-9. **Concurrency limit.** Max simultaneous guests?
-10. **Host-key churn.** Ephemeral ngrok address ⇒ guests get SSH host-key warnings each
-    session. Ship a persistent host key + a note in the connect instructions?
-11. **Tunnel-drop policy.** Re-listen and keep the session, or treat as teardown?
-12. **Snapshot storage.** Where do 7-day snapshots live, and what's the disk budget?
-13. **Join-request expiry.** If the owner is heads-down, should a pending request
+8. **Concurrency limit.** Max simultaneous guests?
+9. **Host-key churn.** Ephemeral ngrok address ⇒ guests get SSH host-key warnings each
+   session. Ship a persistent host key + a note in the connect instructions?
+10. **Tunnel-drop policy.** Re-listen and keep the session, or treat as teardown?
+11. **Snapshot storage.** Where do 7-day snapshots live, and what's the disk budget?
+12. **Join-request expiry.** If the owner is heads-down, should a pending request
     auto-expire (and notify the guest) after a timeout, or wait indefinitely?
-14. **nixpkgs skew.** The host is channel-based; sssh is a flake pinned to `nixos-26.05`.
+13. **nixpkgs skew.** The host is channel-based; sssh is a flake pinned to `nixos-26.05`.
     Importing host modules risks evaluating against two nixpkgs. Match versions, or
     resolve via the shared-module side goal (PLAN §Side goals).
-15. **Import boundary.** How much of the host config to inherit — just the editor/shell/
+14. **Import boundary.** How much of the host config to inherit — just the editor/shell/
     tmux program modules, or the whole home-manager user? Where is the line drawn?
-16. **Non-NixOS owner.** Owner-environment inheritance assumes a NixOS host. What is the
+15. **Non-NixOS owner.** Owner-environment inheritance assumes a NixOS host. What is the
     fallback (dotfile copy? base tools only?) for a non-NixOS owner?
 ```

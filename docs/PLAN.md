@@ -102,18 +102,15 @@ composed (base + owner environment + project toolchain), not a fixed image (DESI
       reconnect as a fresh pending request.
 - [ ] Guests never see the control plane — it is never rendered into the VM tmux.
 
-## M6 — Seeding + reintegration
+## M6 — Project mount + git
 
-**Goal:** real projects go in and edits come back out.
+**Goal:** the live project is in the VM and git works from inside.
 
-- [ ] On startup the entire project directory is copied into the VM verbatim
-      (contents match, no host mount).
+- [ ] The host project directory is mounted read/write into the VM; an edit made in
+      the session appears on the host live (no copy-in, no write-back).
 - [ ] For a git repo, owner git creds are present in the VM and a commit + `git push`
       to the upstream succeeds from inside the session.
-- [ ] On teardown the VM working directory is written back to a sibling `sssh-out/`
-      on the host.
-- [ ] An edit made inside the session is present in `sssh-out/` after teardown.
-- [ ] A non-git project seeds and writes back without requiring creds.
+- [ ] A non-git project mounts and is editable without requiring creds.
 
 ## M7 — Lifecycle + retention hardening
 
@@ -153,7 +150,7 @@ work without them.
 Factor the environment layer of `/etc/nixos` (`programs.neovim`, `programs.tmux`,
 `programs.zsh`, the home-manager user module) into a standalone module imported by both
 the host system and the sandbox (DESIGN §9). M1 imports the host paths directly in the
-meantime; this removes the path coupling and the two-nixpkgs concern (DESIGN §11.14).
+meantime; this removes the path coupling and the two-nixpkgs concern (DESIGN §11.13).
 
 - [ ] The editor/shell/tmux configuration lives in one module imported by both
       `/etc/nixos` and the sandbox.

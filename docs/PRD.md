@@ -5,8 +5,8 @@ This document describes the functional requirements of this project.
 
 * This project is operated by the owner, the user who starts the server
 * The owner starts the server in any directory (the project)
-* The server creates a sandboxed environment seeded with a full copy of the
-  directory's contents
+* The server creates a sandboxed environment with the project directory mounted
+  live from the host
 * The sandboxed environment carries the project's own toolchain when the project
   defines one (a flake), so the pair can build, run, and test
 * The sandboxed environment reuses the owner's editor, shell, and tmux
@@ -30,7 +30,7 @@ This document describes the functional requirements of this project.
   must disconnect, as the end of the session
 * The server closes the ngrok tunnel
 * The sandboxed environment is saved for 7 days
-* On session end, the working directory is written back to the host
+* Project edits are made directly on the host directory, live during the session
 * If the project is a git repo, changes can also be pushed to the upstream remote
 
 
@@ -71,11 +71,13 @@ As a user,
 ## Definitions
 
 * A project is any directory; it may optionally be a git repo, which enables
-  push-based reintegration
+  committing and pushing to the upstream remote
 * A sandbox is an environment where users can modify files freely without
   harming the system (in a NixOS VM)
     * The sandbox is composed from the owner's system configuration and the
       project's own toolchain, not a fixed generic image
+    * The project directory is mounted live from the host, so edits are shared
+      directly; it is the deliberate exception to the isolation above
     * There are no limitations on commands
     * There are no limitations on the network
     * The security is "social" - the owner is watching what the users are doing
