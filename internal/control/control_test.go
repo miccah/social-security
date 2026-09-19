@@ -1,6 +1,7 @@
 package control
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -172,6 +173,21 @@ func TestQuitCanceled(t *testing.T) {
 	}
 	if next.(model).confirmingQuit {
 		t.Fatal("declining should leave confirmation mode")
+	}
+}
+
+// The view reflects whether the owner has joined.
+func TestOwnerStatusDisplayed(t *testing.T) {
+	reg := registry.New()
+	m := newModel(reg, "x")
+	if !strings.Contains(m.View(), "awaiting") {
+		t.Fatalf("view should show the owner is awaited before joining:\n%s", m.View())
+	}
+
+	reg.ClaimOwner()
+	m.refresh()
+	if !strings.Contains(m.View(), "joined") {
+		t.Fatalf("view should show the owner joined:\n%s", m.View())
 	}
 }
 

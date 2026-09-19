@@ -117,9 +117,10 @@ type model struct {
 	reg     registry.Registry
 	connect string
 
-	rows        []row
-	cursor      int
-	prevWaiting int
+	rows         []row
+	cursor       int
+	prevWaiting  int
+	ownerPresent bool
 
 	confirmingQuit bool
 }
@@ -230,6 +231,7 @@ func (m model) kickSelected() {
 // refresh rebuilds the row list from the registry and reports whether the number
 // of waiting requests grew, so the caller can ring the bell.
 func (m *model) refresh() (grewWaiting bool) {
+	m.ownerPresent = m.reg.OwnerPresent()
 	pending := m.reg.Pending()
 	active := m.reg.Active()
 
@@ -261,7 +263,13 @@ func (m *model) refresh() (grewWaiting bool) {
 func (m model) View() string {
 	var b strings.Builder
 	b.WriteString("sssh control\n\n")
-	b.WriteString("connect:  " + m.connect + "\n\n")
+	b.WriteString("connect:  " + m.connect + "\n")
+
+	ownerStatus := "awaiting connection"
+	if m.ownerPresent {
+		ownerStatus = "joined"
+	}
+	fmt.Fprintf(&b, "owner:    %s\n\n", ownerStatus)
 
 	waiting := 0
 	for _, r := range m.rows {
