@@ -7,75 +7,98 @@ import (
 	"testing"
 )
 
-// Message emits a real trailer for a known email and a commented hint for an
-// unknown one, and returns a trailing block that starts its own paragraph.
-func TestMessageKnownAndUnknown(t *testing.T) {
-	got := Message([]string{"alice", "bob"}, map[string]string{"alice": "alice@x.io"}, "subject\n")
-	want := "\nCo-authored-by: alice <alice@x.io>\n# Co-authored-by: bob <add your email>\n"
+// Order appends new users in connection order and holds that order steady as
+// users disconnect and reconnect, so lines keep their position.
+func TestOrderStable(t *testing.T) {
+	s := &Store{}
+	if got := s.Order([]string{"alice", "bob"}); !reflect.DeepEqual(got, []string{"alice", "bob"}) {
+		t.Fatalf("initial order = %v", got)
+	}
+	// bob drops: only alice is credited, but bob keeps his slot in the store.
+	if got := s.Order([]string{"alice"}); !reflect.DeepEqual(got, []string{"alice"}) {
+		t.Fatalf("after bob leaves = %v", got)
+	}
+	// carol joins then bob returns: bob precedes carol by original order.
+	if got := s.Order([]string{"alice", "carol", "bob"}); !reflect.DeepEqual(got, []string{"alice", "bob", "carol"}) {
+		t.Fatalf("after carol joins and bob returns = %v", got)
+	}
+}
+
+// Render emits a real trailer for a known email and a placeholder for an unknown
+// one, appended as the final paragraph.
+func TestRenderKnownAndUnknown(t *testing.T) {
+	s := &Store{entries: []entry{{ssh: "alice", name: "Alice", email: "alice@x.io"}, {ssh: "bob", name: "bob"}}}
+	got := s.Render([]string{"alice", "bob"}, "subject\n")
+	want := "subject\n\nCo-authored-by: Alice <alice@x.io>\nCo-authored-by: bob <add your email>\n"
 	if got != want {
-		t.Fatalf("Message =\n%q\nwant\n%q", got, want)
+		t.Fatalf("Render =\n%q\nwant\n%q", got, want)
 	}
 }
 
-// Message skips users already credited in the message, whether by a real trailer
-// or a commented hint, so re-running the hook does not duplicate them.
-func TestMessageSkipsExisting(t *testing.T) {
-	existing := "subject\n\nCo-authored-by: alice <alice@x.io>\n# Co-authored-by: bob <add your email>\n"
-	if got := Message([]string{"alice", "bob"}, map[string]string{"alice": "alice@x.io"}, existing); got != "" {
-		t.Fatalf("Message = %q, want empty", got)
+// Render is idempotent: re-running over its own output rewrites the same block
+// rather than duplicating it, and dropping a user drops their line.
+func TestRenderIdempotentAndTracksDrop(t *testing.T) {
+	s := &Store{entries: []entry{{ssh: "alice", name: "alice"}, {ssh: "bob", name: "bob"}}}
+	first := s.Render([]string{"alice", "bob"}, "subject\n")
+	if again := s.Render([]string{"alice", "bob"}, first); again != first {
+		t.Fatalf("not idempotent:\n%q\nvs\n%q", again, first)
+	}
+	dropped := s.Render([]string{"alice"}, first)
+	if strings.Contains(dropped, "bob") {
+		t.Fatalf("bob should be dropped:\n%q", dropped)
+	}
+	if !strings.Contains(dropped, "Co-authored-by: alice") {
+		t.Fatalf("alice should remain:\n%q", dropped)
 	}
 }
 
-// Message returns empty when there are no connected users.
-func TestMessageNoUsers(t *testing.T) {
-	if got := Message(nil, nil, "subject\n"); got != "" {
-		t.Fatalf("Message = %q, want empty", got)
+// Learn maps each co-author line to a user by position, recording a filled-in
+// email and leaving an untouched placeholder unknown.
+func TestLearnByPosition(t *testing.T) {
+	s := &Store{entries: []entry{{ssh: "alice", name: "alice"}, {ssh: "bob", name: "bob"}}}
+	order := s.Order([]string{"alice", "bob"})
+	// The user renamed and set an email on the first line; left the second alone.
+	msg := "subject\n\nCo-authored-by: Alice Smith <alice@x.io>\nCo-authored-by: bob <add your email>\n"
+	s.Learn(order, msg)
+	if e := s.get("alice"); e.name != "Alice Smith" || e.email != "alice@x.io" {
+		t.Fatalf("alice = %+v, want Alice Smith/alice@x.io", *e)
+	}
+	if e := s.get("bob"); e.email != "" {
+		t.Fatalf("bob email = %q, want empty (placeholder untouched)", e.email)
 	}
 }
 
-// Parse recovers real co-authors and ignores commented hints and untouched
-// placeholders.
-func TestParse(t *testing.T) {
-	msg := strings.Join([]string{
-		"subject",
-		"",
-		"Co-authored-by: alice <alice@x.io>",
-		"# Co-authored-by: carol <carol@x.io>",
-		"Co-authored-by: bob <add your email>",
-		"Co-authored-by: dave <dave@x.io>",
-	}, "\n")
-	got := Parse(msg)
-	want := map[string]string{"alice": "alice@x.io", "dave": "dave@x.io"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("Parse = %v, want %v", got, want)
+// A first commit round-trips: an unknown user fills their email, and the next
+// commit renders it automatically.
+func TestRenderLearnRoundTrip(t *testing.T) {
+	s := &Store{}
+	order := s.Order([]string{"alice"})
+	first := s.Render(order, "subject\n")
+	filled := strings.Replace(first, "Co-authored-by: alice <add your email>", "Co-authored-by: alice <alice@x.io>", 1)
+	s.Learn(order, filled)
+	next := s.Render(s.Order([]string{"alice"}), "next subject\n")
+	if !strings.Contains(next, "Co-authored-by: alice <alice@x.io>") {
+		t.Fatalf("email not remembered:\n%q", next)
 	}
 }
 
-// A generated hint round-trips: once the user fills the email, Parse recovers it.
-func TestMessageParseRoundTrip(t *testing.T) {
-	block := Message([]string{"bob"}, nil, "subject\n")
-	filled := strings.Replace(block, "# Co-authored-by: bob <add your email>", "Co-authored-by: bob <bob@x.io>", 1)
-	if got := Parse("subject\n" + filled); got["bob"] != "bob@x.io" {
-		t.Fatalf("round-trip email = %q, want bob@x.io", got["bob"])
-	}
-}
-
-// Load and Save round-trip the identity store; a missing file loads empty.
+// Load and Save round-trip the store, preserving order and empty emails; a
+// missing file loads empty.
 func TestLoadSaveRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "sub", "coauthors")
-	if m, err := Load(path); err != nil || len(m) != 0 {
-		t.Fatalf("Load(missing) = %v, %v; want empty, nil", m, err)
+	if s, err := Load(path); err != nil || len(s.entries) != 0 {
+		t.Fatalf("Load(missing) = %v, %v; want empty, nil", s, err)
 	}
-	want := map[string]string{"alice": "alice@x.io", "bob": "bob@x.io"}
-	if err := Save(path, want); err != nil {
+	s := &Store{entries: []entry{{ssh: "alice", name: "Alice", email: "alice@x.io"}, {ssh: "bob", name: "bob"}}}
+	if err := s.Save(path); err != nil {
 		t.Fatal(err)
 	}
 	got, err := Load(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("Load = %v, want %v", got, want)
+	if !reflect.DeepEqual(got.entries, s.entries) {
+		t.Fatalf("Load = %+v, want %+v", got.entries, s.entries)
 	}
 }
 

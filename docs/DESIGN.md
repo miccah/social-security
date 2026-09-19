@@ -334,12 +334,15 @@ the base applied last so its security-critical settings win:
   `git push` is disabled for everyone (see Git identity below).
 - **Git identity & commits:** when the project is a git repo, the VM's git config is
   seeded with the owner's identity, so every commit is authored by the owner (per PRD:
-  the owner's identity is part of the VM). Co-authorship runs through a git commit
-  template driven by the **commit helper** (§5): it generates a
-  `Co-authored-by: <username> <email>` line for each connected user, and parses each
-  commit to learn a user's email — captured on their first commit (a session with no
-  commits never asks) and remembered against their SSH username, so later commits reuse
-  it without reprompting. Push is disabled for everyone: no push credentials enter the
+  the owner's identity is part of the VM). Co-authorship is driven by the **commit
+  helper** (§5), wired as git's prepare-commit-msg and commit-msg hooks. It appends a
+  real `Co-authored-by: <name> <email>` line for each connected user at the end of the
+  message, using a placeholder email for anyone not yet known. On the first commit a
+  user completes their line in the editor; the helper parses the finished message and
+  records their git name and email against their SSH username, so later commits fill the
+  line automatically. The helper keeps users in the order it first added them, so an
+  edited line maps back to its user by position and the block stays stable as users
+  connect and disconnect. Push is disabled for everyone: no push credentials enter the
   VM, and a pre-push hook rejects pushes, so the prohibition is explicit rather than
   incidental. Non-git projects need no git setup.
 - **Teardown:** the VM is destroyed on session end. Nothing is retained: the project
@@ -392,11 +395,12 @@ the base applied last so its security-critical settings win:
     tmux program modules, or the whole home-manager user? Where is the line drawn?
 14. **Non-NixOS owner.** Owner-environment inheritance assumes a NixOS host. What is the
     fallback (dotfile copy? base tools only?) for a non-NixOS owner?
-15. **Commit helper placement & email prompt.** The helper reads the connected set from
-    the host registry, but the template is applied where git runs (the VM). Does it run
-    host-side (invoked over the host↔VM channel) or in the VM (with the connected set
-    pushed in)? And on a user's first commit, how is the email actually elicited — an
-    interactive prompt, or a placeholder line the user edits in the message?
+15. **Commit helper placement & email prompt.** Resolved: the helper runs in the VM as
+    git's commit hooks, and the host publishes the connected set into the VM's 9p share
+    (a Writer mirrors the registry) for it to read. A user's email is elicited as a real
+    placeholder co-author line they complete in the editor on their first commit; the
+    helper learns it by the line's position in the remembered order. An unedited
+    placeholder carries no address, so it is never recorded.
 16. **Push enforcement.** Withholding credentials stops a credentialed push, but a
     forwarded SSH agent or ambient auth could still reach a remote. Is a pre-push hook
     (or a fetch-only remote rewrite) enough to guarantee "push revoked for everyone"?
