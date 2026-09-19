@@ -120,6 +120,8 @@ type model struct {
 	rows        []row
 	cursor      int
 	prevWaiting int
+
+	confirmingQuit bool
 }
 
 func newModel(reg registry.Registry, connect string) model {
@@ -160,14 +162,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.confirmingQuit {
+		return m.handleQuitConfirm(msg)
+	}
 	switch msg.String() {
-	case "q", "ctrl+c":
-		return m, tea.Quit
-	case "up":
+	case "q":
+		// Quitting ends the session for everyone, so confirm first.
+		m.confirmingQuit = true
+		return m, nil
+	case "ctrl+c":
+		// Ctrl+C is an immediate break; do not confirm.
+		return m, nil
+	case "up", "k":
 		if m.cursor > 0 {
 			m.cursor--
 		}
-	case "down":
+	case "down", "j":
 		if m.cursor < len(m.rows)-1 {
 			m.cursor++
 		}
@@ -175,11 +185,23 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.resolveSelected(registry.Accept)
 	case "d":
 		m.resolveSelected(registry.Decline)
-	case "k":
+	case "x":
 		m.kickSelected()
 	}
 	m.refresh()
 	return m, nil
+}
+
+// handleQuitConfirm resolves the quit confirmation: y quits, anything else
+// returns to the control plane.
+func (m model) handleQuitConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "y", "Y":
+		return m, tea.Quit
+	default:
+		m.confirmingQuit = false
+		return m, nil
+	}
 }
 
 func (m model) selected() (row, bool) {
@@ -260,6 +282,10 @@ func (m model) View() string {
 		fmt.Fprintf(&b, "%s%s  %s\n", cursor, tag, r.label)
 	}
 
-	b.WriteString("\n[a]ccept  [d]ecline  [k]ick  [q]uit\n")
+	if m.confirmingQuit {
+		b.WriteString("\nquit and end the session for everyone? [y/N]\n")
+	} else {
+		b.WriteString("\nj/k move  [a]ccept  [d]ecline  [x]kick  [q]uit\n")
+	}
 	return b.String()
 }

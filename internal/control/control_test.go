@@ -69,7 +69,7 @@ func TestKickInvokesOnKick(t *testing.T) {
 	reg.Activate(req, func() { kicked <- struct{}{} })
 
 	m := newModel(reg, "x")
-	m.Update(key('k'))
+	m.Update(key('x'))
 
 	select {
 	case <-kicked:
@@ -86,7 +86,7 @@ func TestNavigateAndAcceptSecond(t *testing.T) {
 	second, _ := reg.AddPending("b", "2", "y")
 
 	m := newModel(reg, "x")
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	next, _ := m.Update(key('j')) // vi-style down
 	m = next.(model)
 	m.Update(key('a'))
 
@@ -118,14 +118,40 @@ func TestBellOnNewPending(t *testing.T) {
 	}
 }
 
-// Quitting the control plane returns tea.Quit.
-func TestQuitReturnsQuitCommand(t *testing.T) {
+// Quitting asks for confirmation first, then y ends the session.
+func TestQuitRequiresConfirmation(t *testing.T) {
 	m := newModel(registry.New(), "x")
-	_, cmd := m.Update(key('q'))
+
+	next, cmd := m.Update(key('q'))
+	if cmd != nil {
+		t.Fatal("q alone should prompt, not quit")
+	}
+	m = next.(model)
+	if !m.confirmingQuit {
+		t.Fatal("q should enter quit confirmation")
+	}
+
+	_, cmd = m.Update(key('y'))
 	if cmd == nil {
-		t.Fatal("q should return a command")
+		t.Fatal("y should confirm the quit")
 	}
 	if _, ok := cmd().(tea.QuitMsg); !ok {
-		t.Fatal("q should return tea.Quit")
+		t.Fatal("confirming should return tea.Quit")
+	}
+}
+
+// Declining the confirmation returns to the control plane without quitting.
+func TestQuitCanceled(t *testing.T) {
+	m := newModel(registry.New(), "x")
+
+	next, _ := m.Update(key('q'))
+	m = next.(model)
+
+	next, cmd := m.Update(key('n'))
+	if cmd != nil {
+		t.Fatal("declining should not quit")
+	}
+	if next.(model).confirmingQuit {
+		t.Fatal("declining should leave confirmation mode")
 	}
 }
