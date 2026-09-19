@@ -362,8 +362,10 @@ the base applied last so its security-critical settings win:
 7. **Terminal sizing.** A shared session clamps all clients to the smallest terminal.
    Acceptable for pairing, or do we want per-client windows (drops the single-screen model)?
 8. **Concurrency limit.** Max simultaneous guests?
-9. **Host-key churn.** Ephemeral ngrok address ⇒ guests get SSH host-key warnings each
-   session. Ship a persistent host key + a note in the connect instructions?
+9. **Host-key churn.** Resolved for the front door: it presents a persistent host key
+   (stored under the user config dir, generated on first use), so the owner's stable
+   `localhost:<port>` entry no longer mismatches across runs. A guest-facing note for
+   the changing ngrok address remains open (M3).
 10. **Tunnel-drop policy.** Re-listen and keep the session, or treat as teardown?
 11. **Snapshot storage.** Where do 7-day snapshots live, and what's the disk budget?
 12. **Join-request expiry.** If the owner is heads-down, should a pending request

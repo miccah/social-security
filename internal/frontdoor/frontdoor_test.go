@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -55,6 +57,7 @@ func startFrontDoor(t *testing.T, reg registry.Registry, vmm vmTarget) string {
 	t.Helper()
 	addr := freeAddr(t)
 	t.Setenv(addrEnv, addr)
+	t.Setenv(hostKeyEnv, filepath.Join(t.TempDir(), "host_ed25519"))
 	fd := New(reg, vmm)
 	if err := fd.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -497,9 +500,74 @@ func TestSandboxNotReady(t *testing.T) {
 // A failed bind aborts Start with an error rather than serving.
 func TestStartBindError(t *testing.T) {
 	t.Setenv(addrEnv, "127.0.0.1:99999") // out-of-range port
+	t.Setenv(hostKeyEnv, filepath.Join(t.TempDir(), "host_ed25519"))
 	fd := New(registry.New(), fakeVMTarget{})
 	if err := fd.Start(context.Background()); err == nil {
 		fd.Stop(context.Background())
 		t.Fatal("Start should error on an unbindable address")
 	}
+}
+
+// hostKeyPath honors the override and creates the parent directory.
+func TestHostKeyPathHonorsEnv(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "keys", "host_ed25519")
+	t.Setenv(hostKeyEnv, path)
+	got, err := hostKeyPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != path {
+		t.Fatalf("hostKeyPath = %q, want %q", got, path)
+	}
+	if _, err := os.Stat(filepath.Dir(path)); err != nil {
+		t.Fatalf("parent dir not created: %v", err)
+	}
+}
+
+// The front door presents the same host key across restarts, so clients see a
+// constant identity.
+func TestHostKeyPersistsAcrossRestarts(t *testing.T) {
+	keyPath := filepath.Join(t.TempDir(), "host_ed25519")
+	first := frontDoorHostKey(t, keyPath)
+	second := frontDoorHostKey(t, keyPath)
+	if first != second {
+		t.Fatalf("host key changed across restarts: %s vs %s", first, second)
+	}
+}
+
+// frontDoorHostKey starts a front door backed by keyPath, connects, and returns
+// the server's host key fingerprint.
+func frontDoorHostKey(t *testing.T, keyPath string) string {
+	t.Helper()
+	addr := freeAddr(t)
+	t.Setenv(addrEnv, addr)
+	t.Setenv(hostKeyEnv, keyPath)
+	fd := New(registry.New(), fakeVMTarget{})
+	if err := fd.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer fd.Stop(context.Background())
+
+	signer := genSigner(t)
+	var fp string
+	var lastErr error
+	for i := 0; i < 100; i++ {
+		c, err := gossh.Dial("tcp", addr, &gossh.ClientConfig{
+			User: "probe",
+			Auth: []gossh.AuthMethod{gossh.PublicKeys(signer)},
+			HostKeyCallback: func(_ string, _ net.Addr, key gossh.PublicKey) error {
+				fp = gossh.FingerprintSHA256(key)
+				return nil
+			},
+			Timeout: 2 * time.Second,
+		})
+		if err == nil {
+			c.Close()
+			return fp
+		}
+		lastErr = err
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("dial front door: %v", lastErr)
+	return ""
 }

@@ -36,6 +36,9 @@ const addrEnv = "SSSH_FRONTDOOR_ADDR"
 // interfaces lets other LAN clients reach the shared session.
 const defaultAddr = ":1337"
 
+// hostKeyEnv overrides the path to the front door's persistent SSH host key.
+const hostKeyEnv = "SSSH_HOST_KEY"
+
 // pendingTimeout bounds how long a guest waits for the owner's decision before
 // the request is dropped and the guest disconnected.
 var pendingTimeout = 2 * time.Minute
@@ -59,9 +62,8 @@ type manager struct {
 	reg registry.Registry
 	vm  vmTarget
 
-	runtimeDir string
-	srv        *ssh.Server
-	ln         net.Listener
+	srv *ssh.Server
+	ln  net.Listener
 }
 
 // New returns a front door that bridges LAN sessions into the VM's shared tmux,
@@ -88,16 +90,15 @@ func (m *manager) Start(context.Context) error {
 		addr = defaultAddr
 	}
 
-	var err error
-	m.runtimeDir, err = os.MkdirTemp("", "sssh-frontdoor-")
+	keyPath, err := hostKeyPath()
 	if err != nil {
-		return fmt.Errorf("create runtime dir: %w", err)
+		return err
 	}
 
 	m.srv, err = wish.NewServer(
-		// A host key persisted for the session's lifetime avoids host-key churn
-		// across repeat LAN connects.
-		wish.WithHostKeyPath(filepath.Join(m.runtimeDir, "host_ed25519")),
+		// A persistent host key gives clients a constant identity across runs, so
+		// the owner's known_hosts entry does not keep mismatching.
+		wish.WithHostKeyPath(keyPath),
 		// Accept any client: the front door does not authenticate, it bridges
 		// every connection straight into the shared session.
 		wish.WithPublicKeyAuth(func(ssh.Context, ssh.PublicKey) bool { return true }),
@@ -135,10 +136,26 @@ func (m *manager) teardown() {
 		m.srv = nil
 	}
 	m.ln = nil
-	if m.runtimeDir != "" {
-		os.RemoveAll(m.runtimeDir)
-		m.runtimeDir = ""
+}
+
+// hostKeyPath returns the path to the front door's SSH host key. Reusing one key
+// across runs gives clients a constant host identity, so they do not hit
+// known_hosts mismatches. It honors hostKeyEnv, otherwise the key lives under the
+// user config dir. The parent directory is created; wish generates the key on
+// first use and loads it thereafter.
+func hostKeyPath() (string, error) {
+	path := os.Getenv(hostKeyEnv)
+	if path == "" {
+		dir, err := os.UserConfigDir()
+		if err != nil {
+			return "", fmt.Errorf("locate config dir: %w", err)
+		}
+		path = filepath.Join(dir, "sssh", "host_ed25519")
 	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return "", fmt.Errorf("create host key dir: %w", err)
+	}
+	return path, nil
 }
 
 // joinMiddleware handles each connection: run the join ceremony, wait for the
