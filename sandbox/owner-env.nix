@@ -3,14 +3,25 @@
 # flake.nix). Only these are taken; the host's services, users, and secrets are
 # left behind. The shared tmux session and every pane therefore match the
 # owner's usual setup.
-{ pkgs, hostConfig, ... }:
+{ pkgs, lib, hostConfig, ... }:
 
-{
+let
+  # Pull a package out of the host's systemPackages by its binary name, so the
+  # scripts stay defined once in the host config. The name is the binary
+  # (writeShellScriptBin's first argument), not the host's let-binding.
+  fromHost = name:
+    lib.findFirst (p: lib.getName p == name)
+      (throw "sandbox: ${name} not in host systemPackages")
+      hostConfig.environment.systemPackages;
+in {
   environment.systemPackages = [
     # The owner's neovim, wrapped with their plugins and config.
     hostConfig.programs.neovim.finalPackage
     pkgs.tmux
     pkgs.zsh
+    # The owner's clipboard scripts, borrowed from the host.
+    (fromHost "yank")
+    (fromHost "put")
   ];
 
   # The owner's editor is the default.
