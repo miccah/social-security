@@ -27,7 +27,8 @@ the host, since the directory was mounted live.
 - Shared read/write tmux session for real pair programming.
 - Owner-mediated join (accept/decline) keyed by an out-of-band SSN.
 - The project is any directory (git optional); its directory is mounted live from
-  the host, and `git push` is additionally available when a remote exists.
+  the host. When it is a git repo, participants can commit — authored by the owner,
+  co-authored by the connected users — while `git push` is disabled for everyone.
 - Session ends when the owner disconnects (including transient drops).
 - The sandbox carries the project's own toolchain (from its flake) so pairs can
   build, run, and test with the project's compilers, LSPs, and tools.
@@ -108,7 +109,8 @@ connect to — so it is both invisible to guests and unreachable by them.
 - **VM manager** — builds/boots the NixOS VM (composed from the base module, the
   owner's host environment modules, and — when the project has a flake — its
   `devShell` entered via `nix develop`), waits for sshd readiness, mounts the
-  project directory read/write plus optional git creds, and destroys the VM on
+  project directory read/write and, for a git repo, seeds the owner's git identity
+  (the commit author) without any push credentials, and destroys the VM on
   teardown.
 - **Tunnel manager** — creates the ngrok TCP listener, surfaces the public address to
   the control plane, closes on teardown.
@@ -124,6 +126,13 @@ connect to — so it is both invisible to guests and unreachable by them.
   connect to.
 - **Bridge** — pipes an accepted guest's PTY to `ssh -t <vm> tmux attach -t pairing`
   over the host-only network; tears the pipe down on kick/teardown.
+- **Commit helper** — a standalone program that generates and parses the git commit
+  template from the currently connected users (read from the registry). It owns the
+  SSH-username → git-identity (username + email) mapping: on generate it emits a
+  `Co-authored-by: <username> <email>` line per connected user; on parse it reads a
+  completed commit to learn a user's email (captured on their first commit) and records
+  it against their SSH username for reuse. Invoked from the VM's git template/hook so
+  co-authorship tracks the live participant set.
 
 ## 6. Key flows
 
@@ -285,7 +294,8 @@ reconnect as a fresh pending request.
 - **Host ⇄ VM:** host-only virtual NIC; host holds an SSH key for the VM's sshd. Used
   only to attach tmux for accepted guests.
 - **VM egress:** NAT to the internet (QEMU user-net or tap+NAT) — "no network limits"
-  inside the VM, and enables `git push` to upstream.
+  inside the VM. `git push` stays disabled regardless (§9), so egress serves builds,
+  tests, and fetches, not pushing.
 
 ## 9. Sandbox / VM
 
@@ -320,11 +330,18 @@ the base applied last so its security-critical settings win:
   today; virtiofs if perf or file-watching semantics bite). Edits are live on the
   host, so there is no copy-in, no write-back, and no `sssh-out/`. This is the
   deliberate exception to VM isolation: the system is sandboxed, the project
-  directory is shared. If the project is a git repo with a remote, `git push` is
-  additionally available during the session.
-- **Credentials:** when the project is a git repo, owner git creds are placed in the VM
-  (per PRD; exfiltration is out of the threat model) so any participant can commit and
-  push as they go. Non-git projects need no creds.
+  directory is shared. When the project is a git repo, participants commit locally;
+  `git push` is disabled for everyone (see Git identity below).
+- **Git identity & commits:** when the project is a git repo, the VM's git config is
+  seeded with the owner's identity, so every commit is authored by the owner (per PRD:
+  the owner's identity is part of the VM). Co-authorship runs through a git commit
+  template driven by the **commit helper** (§5): it generates a
+  `Co-authored-by: <username> <email>` line for each connected user, and parses each
+  commit to learn a user's email — captured on their first commit (a session with no
+  commits never asks) and remembered against their SSH username, so later commits reuse
+  it without reprompting. Push is disabled for everyone: no push credentials enter the
+  VM, and a pre-push hook rejects pushes, so the prohibition is explicit rather than
+  incidental. Non-git projects need no git setup.
 - **Teardown:** the VM is destroyed on session end. Nothing is retained: the project
   lives on the host (mounted live), so there is no VM state worth keeping.
 
@@ -375,4 +392,12 @@ the base applied last so its security-critical settings win:
     tmux program modules, or the whole home-manager user? Where is the line drawn?
 14. **Non-NixOS owner.** Owner-environment inheritance assumes a NixOS host. What is the
     fallback (dotfile copy? base tools only?) for a non-NixOS owner?
+15. **Commit helper placement & email prompt.** The helper reads the connected set from
+    the host registry, but the template is applied where git runs (the VM). Does it run
+    host-side (invoked over the host↔VM channel) or in the VM (with the connected set
+    pushed in)? And on a user's first commit, how is the email actually elicited — an
+    interactive prompt, or a placeholder line the user edits in the message?
+16. **Push enforcement.** Withholding credentials stops a credentialed push, but a
+    forwarded SSH agent or ambient auth could still reach a remote. Is a pre-push hook
+    (or a fetch-only remote rewrite) enough to guarantee "push revoked for everyone"?
 ```
