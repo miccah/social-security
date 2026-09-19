@@ -39,11 +39,14 @@ type Bridge interface {
 type bridge struct {
 	target  vm.Target
 	session ssh.Session
+	stdin   io.Reader
 }
 
 // New returns a bridge that attaches the guest session to the VM's pairing tmux.
-func New(target vm.Target, s ssh.Session) Bridge {
-	return &bridge{target: target, session: s}
+// The VM's output is written to the session; guest input is read from stdin,
+// which the caller may wrap (the raw session is the common case).
+func New(target vm.Target, s ssh.Session, stdin io.Reader) Bridge {
+	return &bridge{target: target, session: s, stdin: stdin}
 }
 
 func (b *bridge) Run(ctx context.Context) error {
@@ -91,7 +94,7 @@ func (b *bridge) Run(ctx context.Context) error {
 		}()
 	}
 
-	sess.Stdin = b.session
+	sess.Stdin = b.stdin
 	sess.Stdout = b.session
 	sess.Stderr = b.session.Stderr()
 

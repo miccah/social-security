@@ -63,13 +63,15 @@ func startFrontDoor(t *testing.T, reg registry.Registry, vmm vmTarget) string {
 	return addr
 }
 
-func dialGuest(t *testing.T, addr string) *gossh.Client {
+func dialGuest(t *testing.T, addr string) *gossh.Client { return dialGuestAs(t, addr, "guest") }
+
+func dialGuestAs(t *testing.T, addr, user string) *gossh.Client {
 	t.Helper()
 	signer := genSigner(t)
 	var lastErr error
 	for i := 0; i < 100; i++ {
 		c, err := gossh.Dial("tcp", addr, &gossh.ClientConfig{
-			User:            "guest",
+			User:            user,
 			Auth:            []gossh.AuthMethod{gossh.PublicKeys(signer)},
 			HostKeyCallback: gossh.InsecureIgnoreHostKey(),
 			Timeout:         2 * time.Second,
@@ -82,6 +84,56 @@ func dialGuest(t *testing.T, addr string) *gossh.Client {
 	}
 	t.Fatalf("dial front door: %v", lastErr)
 	return nil
+}
+
+// openShell opens a pty session and starts a shell, returning the pipes the join
+// ceremony reads and writes.
+func openShell(t *testing.T, client *gossh.Client) (*gossh.Session, io.WriteCloser, io.Reader) {
+	t.Helper()
+	sess, err := client.NewSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { sess.Close() })
+	if err := sess.RequestPty("xterm", 24, 80, gossh.TerminalModes{}); err != nil {
+		t.Fatal(err)
+	}
+	stdin, err := sess.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout, err := sess.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sess.Shell(); err != nil {
+		t.Fatal(err)
+	}
+	return sess, stdin, stdout
+}
+
+// writeLine sends one ceremony answer; the terminal treats CR as Enter.
+func writeLine(t *testing.T, w io.Writer, line string) {
+	t.Helper()
+	if _, err := io.WriteString(w, line+"\r"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// awaitPending blocks until a request for username is queued, then returns it.
+func awaitPending(t *testing.T, reg registry.Registry, username string) registry.Request {
+	t.Helper()
+	var got registry.Request
+	waitFor(t, 5*time.Second, func() bool {
+		for _, p := range reg.Pending() {
+			if p.Username == username {
+				got = p
+				return true
+			}
+		}
+		return false
+	}, "request for "+username+" never landed in pending")
+	return got
 }
 
 // vmRecorder captures what the bridge asked the (fake) guest sshd to do.
@@ -246,10 +298,11 @@ func readContains(t *testing.T, r io.Reader, want string, timeout time.Duration)
 	}
 }
 
-// A stock ssh client lands in the shared pairing session (never a host shell),
-// its terminal size and resizes reach the VM, bytes flow both ways, and the
-// registry tracks the connection and frees it on disconnect.
-func TestFrontDoorBridgesGuestIntoPairing(t *testing.T) {
+// A guest completes the ceremony, waits, is accepted by the owner, and is then
+// bridged into the shared pairing session: the tmux attach runs on the VM, the
+// terminal size and resizes reach it, bytes flow both ways, and the registry
+// tracks the connection and frees it on disconnect.
+func TestGuestJoinAcceptBridges(t *testing.T) {
 	sessionSigner := genSigner(t)
 	vmAddr, rec := newFakeVM(t, sessionSigner.PublicKey())
 
@@ -259,88 +312,190 @@ func TestFrontDoorBridgesGuestIntoPairing(t *testing.T) {
 
 	client := dialGuest(t, frontAddr)
 	defer client.Close()
-	sess, err := client.NewSession()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer sess.Close()
+	sess, stdin, stdout := openShell(t, client)
 
-	if err := sess.RequestPty("xterm", 24, 80, gossh.TerminalModes{}); err != nil {
-		t.Fatal(err)
+	writeLine(t, stdin, "alice")
+	writeLine(t, stdin, "123-45-6789")
+
+	req := awaitPending(t, reg, "alice")
+	if req.SSN != "123-45-6789" {
+		t.Fatalf("SSN = %q, want 123-45-6789", req.SSN)
 	}
-	stdin, err := sess.StdinPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	stdout, err := sess.StdoutPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := sess.Shell(); err != nil {
+	if err := reg.Resolve(req.ID, registry.Accept); err != nil {
 		t.Fatal(err)
 	}
 
-	// The bridge attaches to the pairing session, not a host shell.
 	waitFor(t, 5*time.Second, func() bool { return rec.cmd() == "tmux new-session -A -s pairing" },
-		"VM never received the pairing attach command")
-	// The guest's terminal size is mirrored into the VM session.
+		"guest was not bridged into the pairing session")
 	waitFor(t, 5*time.Second, func() bool { c, r := rec.pty(); return c == 80 && r == 24 },
-		"VM never received the guest pty size")
+		"guest pty size not mirrored to the VM")
 
-	// A client resize propagates to the VM pane.
 	if err := sess.WindowChange(40, 100); err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, 5*time.Second, func() bool { return rec.hasResize(100, 40) },
 		"resize did not propagate to the VM")
 
-	// Bytes flow both ways: the VM echo comes back to the guest.
-	if _, err := io.WriteString(stdin, "ping\n"); err != nil {
-		t.Fatal(err)
-	}
+	io.WriteString(stdin, "ping\n")
 	readContains(t, stdout, "ping", 5*time.Second)
 
 	if reg.Count() != 1 {
 		t.Fatalf("active count = %d, want 1 while connected", reg.Count())
 	}
-
 	client.Close()
 	waitFor(t, 5*time.Second, func() bool { return reg.Count() == 0 },
-		"session was not removed from the registry after disconnect")
+		"session not removed from the registry after disconnect")
 }
 
-// When the sandbox is not ready the guest is told and disconnected, and no
-// session lingers in the registry.
-func TestFrontDoorSandboxNotReady(t *testing.T) {
+// An empty username defaults to the SSH login username.
+func TestGuestUsernameDefaultsToSSHUser(t *testing.T) {
+	reg := registry.New()
+	frontAddr := startFrontDoor(t, reg, fakeVMTarget{})
+
+	client := dialGuestAs(t, frontAddr, "frank")
+	defer client.Close()
+	_, stdin, _ := openShell(t, client)
+
+	writeLine(t, stdin, "") // accept the default
+	writeLine(t, stdin, "ssn")
+	awaitPending(t, reg, "frank")
+}
+
+// A taken username is rejected and the guest is reprompted until one is free.
+func TestGuestRepromptedOnTakenUsername(t *testing.T) {
+	reg := registry.New()
+	if _, err := reg.AddPending("alice", "x", "10.0.0.9:1"); err != nil {
+		t.Fatal(err)
+	}
+	frontAddr := startFrontDoor(t, reg, fakeVMTarget{})
+
+	client := dialGuest(t, frontAddr)
+	defer client.Close()
+	_, stdin, stdout := openShell(t, client)
+
+	writeLine(t, stdin, "alice") // taken
+	writeLine(t, stdin, "ssn")
+	writeLine(t, stdin, "alice2") // free
+	writeLine(t, stdin, "ssn")
+
+	readContains(t, stdout, "taken", 5*time.Second)
+	awaitPending(t, reg, "alice2")
+}
+
+// Declining tells the guest and frees the username.
+func TestGuestDeclined(t *testing.T) {
+	reg := registry.New()
+	frontAddr := startFrontDoor(t, reg, fakeVMTarget{})
+
+	client := dialGuest(t, frontAddr)
+	defer client.Close()
+	sess, stdin, stdout := openShell(t, client)
+
+	writeLine(t, stdin, "bob")
+	writeLine(t, stdin, "ssn")
+	req := awaitPending(t, reg, "bob")
+	if err := reg.Resolve(req.ID, registry.Decline); err != nil {
+		t.Fatal(err)
+	}
+
+	readContains(t, stdout, "declined", 5*time.Second)
+	sess.Wait()
+	if _, err := reg.AddPending("bob", "x", "y"); err != nil {
+		t.Fatalf("username should be free after decline: %v", err)
+	}
+}
+
+// A pending request that no one resolves times out, tells the guest, and frees
+// the username.
+func TestPendingTimeout(t *testing.T) {
+	prev := pendingTimeout
+	pendingTimeout = 200 * time.Millisecond
+	defer func() { pendingTimeout = prev }()
+
+	reg := registry.New()
+	frontAddr := startFrontDoor(t, reg, fakeVMTarget{})
+
+	client := dialGuest(t, frontAddr)
+	defer client.Close()
+	_, stdin, stdout := openShell(t, client)
+
+	writeLine(t, stdin, "carol")
+	writeLine(t, stdin, "ssn")
+
+	readContains(t, stdout, "timed out", 5*time.Second)
+	waitFor(t, 5*time.Second, func() bool { return len(reg.Pending()) == 0 }, "pending not cleared after timeout")
+	if _, err := reg.AddPending("carol", "x", "y"); err != nil {
+		t.Fatalf("username should be free after timeout: %v", err)
+	}
+}
+
+// A guest that disconnects while pending drops its request and frees the name.
+func TestGuestDisconnectWhilePending(t *testing.T) {
+	reg := registry.New()
+	frontAddr := startFrontDoor(t, reg, fakeVMTarget{})
+
+	client := dialGuest(t, frontAddr)
+	_, stdin, _ := openShell(t, client)
+	writeLine(t, stdin, "dave")
+	writeLine(t, stdin, "ssn")
+	awaitPending(t, reg, "dave")
+
+	client.Close()
+	waitFor(t, 5*time.Second, func() bool { return len(reg.Pending()) == 0 }, "pending not cleared after disconnect")
+	if _, err := reg.AddPending("dave", "x", "y"); err != nil {
+		t.Fatalf("username should be free after disconnect: %v", err)
+	}
+}
+
+// A guest can Ctrl+C out of the queue, which drops the request and frees the name.
+func TestGuestCancelsWithCtrlC(t *testing.T) {
+	reg := registry.New()
+	frontAddr := startFrontDoor(t, reg, fakeVMTarget{})
+
+	client := dialGuest(t, frontAddr)
+	defer client.Close()
+	sess, stdin, stdout := openShell(t, client)
+
+	writeLine(t, stdin, "grace")
+	writeLine(t, stdin, "ssn")
+	awaitPending(t, reg, "grace")
+
+	if _, err := stdin.Write([]byte{0x03}); err != nil { // Ctrl+C
+		t.Fatal(err)
+	}
+	readContains(t, stdout, "cancelled", 5*time.Second)
+	sess.Wait()
+
+	waitFor(t, 5*time.Second, func() bool { return len(reg.Pending()) == 0 }, "pending not cleared after ctrl-c")
+	if _, err := reg.AddPending("grace", "x", "y"); err != nil {
+		t.Fatalf("username should be free after ctrl-c: %v", err)
+	}
+}
+
+// An accepted guest whose sandbox is unreachable is told and disconnected, with
+// no session left behind.
+func TestSandboxNotReady(t *testing.T) {
 	reg := registry.New()
 	frontAddr := startFrontDoor(t, reg, fakeVMTarget{err: errors.New("not started")})
 
 	client := dialGuest(t, frontAddr)
 	defer client.Close()
-	sess, err := client.NewSession()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer sess.Close()
-	if err := sess.RequestPty("xterm", 24, 80, gossh.TerminalModes{}); err != nil {
-		t.Fatal(err)
-	}
-	stderr, err := sess.StderrPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := sess.Shell(); err != nil {
+	sess, stdin, stdout := openShell(t, client)
+
+	writeLine(t, stdin, "erin")
+	writeLine(t, stdin, "ssn")
+	req := awaitPending(t, reg, "erin")
+	if err := reg.Resolve(req.ID, registry.Accept); err != nil {
 		t.Fatal(err)
 	}
 
-	readContains(t, stderr, "sandbox not ready", 5*time.Second)
+	readContains(t, stdout, "sandbox not ready", 5*time.Second)
 	sess.Wait()
-	waitFor(t, 5*time.Second, func() bool { return reg.Count() == 0 },
-		"session was not removed after the sandbox-not-ready path")
+	waitFor(t, 5*time.Second, func() bool { return reg.Count() == 0 }, "active session not cleared")
 }
 
 // A failed bind aborts Start with an error rather than serving.
-func TestFrontDoorStartBindError(t *testing.T) {
+func TestStartBindError(t *testing.T) {
 	t.Setenv(addrEnv, "127.0.0.1:99999") // out-of-range port
 	fd := New(registry.New(), fakeVMTarget{})
 	if err := fd.Start(context.Background()); err == nil {

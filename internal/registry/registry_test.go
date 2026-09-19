@@ -1,54 +1,118 @@
 package registry
 
 import (
+	"errors"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
 )
 
-// The registry tracks the active set and owner presence, and dropping a session
-// removes its entry and clears owner presence when the last owner leaves.
-func TestActiveSetAndOwnerPresence(t *testing.T) {
+// A join request lands in pending, an accept promotes it to active, and removing
+// the active session frees the username for reuse.
+func TestPendingAcceptActivate(t *testing.T) {
 	r := New()
 	if r.Count() != 0 {
 		t.Fatalf("Count = %d, want 0", r.Count())
 	}
-	if r.OwnerPresent() {
-		t.Fatal("no owner should be present initially")
+
+	req, err := r.AddPending("alice", "123-45-6789", "10.0.0.1:2200")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending := r.Pending()
+	if len(pending) != 1 || pending[0].Username != "alice" || pending[0].SSN != "123-45-6789" {
+		t.Fatalf("Pending = %+v, want one request for alice", pending)
 	}
 
-	owner := r.Add("10.0.0.1:2200", true)
-	time.Sleep(time.Millisecond) // distinct ConnectedAt for stable ordering
-	guest := r.Add("10.0.0.2:2200", false)
-
-	if owner.ID == guest.ID {
-		t.Fatal("session IDs must be unique")
+	if err := r.Resolve(req.ID, Accept); err != nil {
+		t.Fatal(err)
 	}
-	if r.Count() != 2 {
-		t.Fatalf("Count = %d, want 2", r.Count())
+	if d := <-req.Decision(); d != Accept {
+		t.Fatalf("decision = %v, want Accept", d)
 	}
-	if !r.OwnerPresent() {
-		t.Fatal("owner should be present")
+	if len(r.Pending()) != 0 {
+		t.Fatal("request should leave pending once resolved")
 	}
 
-	active := r.Active()
-	if len(active) != 2 || active[0].ID != owner.ID || active[1].ID != guest.ID {
-		t.Fatalf("Active = %+v, want owner then guest", active)
+	sess := r.Activate(req)
+	if sess.Username != "alice" {
+		t.Fatalf("session username = %q, want alice", sess.Username)
 	}
-
-	r.Remove(owner.ID)
 	if r.Count() != 1 {
-		t.Fatalf("Count = %d, want 1 after owner leaves", r.Count())
-	}
-	if r.OwnerPresent() {
-		t.Fatal("owner presence should clear once the owner disconnects")
+		t.Fatalf("Count = %d, want 1", r.Count())
 	}
 
-	r.Remove(guest.ID)
+	r.RemoveActive(sess.ID)
 	if r.Count() != 0 {
-		t.Fatalf("Count = %d, want 0", r.Count())
+		t.Fatalf("Count = %d, want 0 after disconnect", r.Count())
 	}
-	r.Remove("no-such-id") // must not panic
+	// The username is free again.
+	if _, err := r.AddPending("alice", "x", "y"); err != nil {
+		t.Fatalf("username should be free after the session ends: %v", err)
+	}
+}
+
+// A username claimed by a pending or active entry is rejected until it is freed.
+func TestUsernameUniqueness(t *testing.T) {
+	r := New()
+	if _, err := r.AddPending("bob", "1", "a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.AddPending("bob", "2", "b"); !errors.Is(err, ErrUsernameTaken) {
+		t.Fatalf("err = %v, want ErrUsernameTaken", err)
+	}
+}
+
+// Declining delivers the decision and frees the username.
+func TestDeclineFreesUsername(t *testing.T) {
+	r := New()
+	req, err := r.AddPending("carol", "1", "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Resolve(req.ID, Decline); err != nil {
+		t.Fatal(err)
+	}
+	if d := <-req.Decision(); d != Decline {
+		t.Fatalf("decision = %v, want Decline", d)
+	}
+	if _, err := r.AddPending("carol", "2", "b"); err != nil {
+		t.Fatalf("username should be free after decline: %v", err)
+	}
+}
+
+// Cancelling a pending request drops it and frees the username; Resolve on an
+// unknown request errors.
+func TestCancelPendingAndUnknownResolve(t *testing.T) {
+	r := New()
+	req, err := r.AddPending("dave", "1", "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.CancelPending(req.ID)
+	if len(r.Pending()) != 0 {
+		t.Fatal("request should be gone after cancel")
+	}
+	if _, err := r.AddPending("dave", "2", "b"); err != nil {
+		t.Fatalf("username should be free after cancel: %v", err)
+	}
+	if err := r.Resolve("no-such-id", Accept); err == nil {
+		t.Fatal("Resolve of an unknown request should error")
+	}
+	r.CancelPending("no-such-id") // must not panic
+}
+
+// Pending is returned oldest first.
+func TestPendingOrder(t *testing.T) {
+	r := New()
+	first, _ := r.AddPending("a", "1", "x")
+	time.Sleep(time.Millisecond)
+	second, _ := r.AddPending("b", "2", "y")
+	p := r.Pending()
+	if len(p) != 2 || p[0].ID != first.ID || p[1].ID != second.ID {
+		t.Fatalf("Pending order = %+v, want first then second", p)
+	}
 }
 
 // Concurrent access is safe (run under -race).
@@ -57,14 +121,22 @@ func TestConcurrentAccess(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := 0; i < 64; i++ {
 		wg.Add(1)
-		go func() {
+		go func(n int) {
 			defer wg.Done()
-			s := r.Add("10.0.0.9:2200", false)
+			name := "user-" + strconv.Itoa(n)
+			req, err := r.AddPending(name, "ssn", "addr")
+			if err != nil {
+				return
+			}
+			_ = r.Pending()
 			_ = r.Active()
 			_ = r.Count()
-			_ = r.OwnerPresent()
-			r.Remove(s.ID)
-		}()
+			if err := r.Resolve(req.ID, Accept); err == nil {
+				<-req.Decision()
+				sess := r.Activate(req)
+				r.RemoveActive(sess.ID)
+			}
+		}(i)
 	}
 	wg.Wait()
 	if r.Count() != 0 {
