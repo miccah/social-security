@@ -16,8 +16,8 @@ TCP tunnel, and runs an SSH front door. Guests connect with a stock `ssh` client
 pick a username, enter an SSN (an out-of-band matching token, not a validated
 secret), and wait for the owner to accept. Accepted guests are bridged into a
 shared tmux session running *inside the VM*. When the owner's connection ends,
-everyone is disconnected and the VM is snapshotted for 7 days; project edits are
-already on the host, since the directory was mounted live.
+everyone is disconnected and the VM is destroyed; project edits are already on
+the host, since the directory was mounted live.
 
 ## 2. Goals / non-goals
 
@@ -73,7 +73,7 @@ flowchart LR
         REG["session registry<br/>pending / active / owner presence"]
         DMN["control plane<br/>(launching terminal)<br/>connect strings + status + accept/decline/kick"]
         TUN["tunnel manager<br/>ngrok lifecycle"]
-        VMM["VM manager<br/>boot / snapshot 7d / destroy"]
+        VMM["VM manager<br/>boot / destroy"]
 
         subgraph VM["NixOS VM (QEMU/KVM)"]
             SSHD["sshd on host-only iface"]
@@ -108,8 +108,8 @@ connect to — so it is both invisible to guests and unreachable by them.
 - **VM manager** — builds/boots the NixOS VM (composed from the base module, the
   owner's host environment modules, and — when the project has a flake — its
   `devShell` entered via `nix develop`), waits for sshd readiness, mounts the
-  project directory read/write plus optional git creds, snapshots the VM, GCs
-  snapshots older than 7 days.
+  project directory read/write plus optional git creds, and destroys the VM on
+  teardown.
 - **Tunnel manager** — creates the ngrok TCP listener, surfaces the public address to
   the control plane, closes on teardown.
 - **SSH front door (wish)** — two listeners: ngrok (guests) and LAN (owner). Runs the
@@ -179,9 +179,9 @@ sequenceDiagram
     R->>F: disconnect all active guests
     F-->>F: close guest PTYs / bridges
     R->>V: kill tmux pairing session
-    R->>V: snapshot VM (retain 7d)
+    R->>V: destroy VM
     R->>Tn: close ngrok tunnel
-    Note over R: process exits, snapshot GC'd after 7 days
+    Note over R: process exits
 ```
 
 ### 6.3 Guest connection state machine
@@ -325,9 +325,8 @@ the base applied last so its security-critical settings win:
 - **Credentials:** when the project is a git repo, owner git creds are placed in the VM
   (per PRD; exfiltration is out of the threat model) so any participant can commit and
   push as they go. Non-git projects need no creds.
-- **Retention:** on teardown, snapshot the VM disk and keep it 7 days; a GC pass on
-  startup removes older snapshots. The snapshot holds the VM's ephemeral state, not
-  the project source (which lives on the host), so project undo comes from git.
+- **Teardown:** the VM is destroyed on session end. Nothing is retained: the project
+  lives on the host (mounted live), so there is no VM state worth keeping.
 
 ## 10. Lifecycle & failure handling
 
@@ -367,14 +366,13 @@ the base applied last so its security-critical settings win:
    `localhost:<port>` entry no longer mismatches across runs. A guest-facing note for
    the changing ngrok address remains open (M3).
 10. **Tunnel-drop policy.** Re-listen and keep the session, or treat as teardown?
-11. **Snapshot storage.** Where do 7-day snapshots live, and what's the disk budget?
-12. **Join-request expiry.** If the owner is heads-down, should a pending request
+11. **Join-request expiry.** If the owner is heads-down, should a pending request
     auto-expire (and notify the guest) after a timeout, or wait indefinitely?
-13. **nixpkgs skew.** The host is channel-based; sssh is a flake pinned to `nixos-26.05`.
+12. **nixpkgs skew.** The host is channel-based; sssh is a flake pinned to `nixos-26.05`.
     Importing host modules risks evaluating against two nixpkgs. Match versions, or
     resolve via the shared-module side goal (PLAN §Side goals).
-14. **Import boundary.** How much of the host config to inherit — just the editor/shell/
+13. **Import boundary.** How much of the host config to inherit — just the editor/shell/
     tmux program modules, or the whole home-manager user? Where is the line drawn?
-15. **Non-NixOS owner.** Owner-environment inheritance assumes a NixOS host. What is the
+14. **Non-NixOS owner.** Owner-environment inheritance assumes a NixOS host. What is the
     fallback (dotfile copy? base tools only?) for a non-NixOS owner?
 ```

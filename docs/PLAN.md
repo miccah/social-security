@@ -112,7 +112,7 @@ composed (base + owner environment + project toolchain), not a fixed image (DESI
       to the upstream succeeds from inside the session.
 - [ ] A non-git project mounts and is editable without requiring creds.
 
-## M7 — Lifecycle + retention hardening
+## M7 — Lifecycle hardening
 
 **Goal:** the §10 failure table behaves as specified.
 
@@ -121,8 +121,7 @@ composed (base + owner environment + project toolchain), not a fixed image (DESI
 - [ ] Guest drop removes it from `active`, frees the username, and leaves the session
       running for others.
 - [ ] VM-boot failure aborts startup before any tunnel is opened.
-- [ ] Teardown snapshots the VM disk; a startup GC pass deletes snapshots older than
-      7 days and retains newer ones.
+- [ ] Teardown destroys the VM; nothing is retained (the project lives on the host).
 - [ ] Every row of DESIGN §10 has a corresponding passing test or manual verification.
 
 ## M8 — Polish (open questions)
@@ -150,7 +149,7 @@ work without them.
 Factor the environment layer of `/etc/nixos` (`programs.neovim`, `programs.tmux`,
 `programs.zsh`, the home-manager user module) into a standalone module imported by both
 the host system and the sandbox (DESIGN §9). M1 imports the host paths directly in the
-meantime; this removes the path coupling and the two-nixpkgs concern (DESIGN §11.13).
+meantime; this removes the path coupling and the two-nixpkgs concern (DESIGN §11.12).
 
 - [ ] The editor/shell/tmux configuration lives in one module imported by both
       `/etc/nixos` and the sandbox.

@@ -29,7 +29,6 @@ This document describes the functional requirements of this project.
 * At any point if the owner detaches or closes their tmux session, all users
   must disconnect, as the end of the session
 * The server closes the ngrok tunnel
-* The sandboxed environment is saved for 7 days
 * Project edits are made directly on the host directory, live during the session
 * If the project is a git repo, changes can also be pushed to the upstream remote
 
