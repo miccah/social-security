@@ -4,9 +4,55 @@ import (
 	"errors"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
+
+// The owner slot is claimed once, blocks further claims until released, and can
+// be reclaimed afterward.
+func TestOwnerSlotClaimRelease(t *testing.T) {
+	r := New()
+	if r.OwnerPresent() {
+		t.Fatal("no owner should be present initially")
+	}
+	if !r.ClaimOwner() {
+		t.Fatal("the first claim should succeed")
+	}
+	if !r.OwnerPresent() {
+		t.Fatal("owner should be present after a claim")
+	}
+	if r.ClaimOwner() {
+		t.Fatal("a second claim should fail while the owner is present")
+	}
+	r.ReleaseOwner()
+	if r.OwnerPresent() {
+		t.Fatal("owner should be gone after release")
+	}
+	if !r.ClaimOwner() {
+		t.Fatal("claim should succeed again after release")
+	}
+}
+
+// Exactly one racing caller wins the owner slot.
+func TestClaimOwnerExactlyOnceUnderRace(t *testing.T) {
+	r := New()
+	var wins int32
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if r.ClaimOwner() {
+				atomic.AddInt32(&wins, 1)
+			}
+		}()
+	}
+	wg.Wait()
+	if wins != 1 {
+		t.Fatalf("owner claimed %d times, want exactly 1", wins)
+	}
+}
 
 // A join request lands in pending, an accept promotes it to active, and removing
 // the active session frees the username for reuse.

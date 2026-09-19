@@ -75,6 +75,14 @@ type Registry interface {
 	// ID returns an error.
 	Kick(id string) error
 
+	// ClaimOwner marks the caller as the owner when the slot is free, returning
+	// true. Once claimed, later callers get false and are treated as guests.
+	ClaimOwner() bool
+	// ReleaseOwner frees the owner slot when the owner disconnects.
+	ReleaseOwner()
+	// OwnerPresent reports whether the owner slot is claimed.
+	OwnerPresent() bool
+
 	// Pending returns a snapshot of the waiting requests, oldest first.
 	Pending() []Request
 	// Active returns a snapshot of the active sessions, oldest first.
@@ -93,6 +101,7 @@ type registry struct {
 	pending map[string]*Request
 	active  map[string]Session
 	kicks   map[string]func() // per active session, invoked by Kick
+	owner   bool              // true once a connection has claimed the owner slot
 	events  chan struct{}
 }
 
@@ -212,6 +221,34 @@ func (r *registry) Kick(id string) error {
 	onKick() // closes the connection; the front door frees the name via RemoveActive
 	r.notify()
 	return nil
+}
+
+func (r *registry) ClaimOwner() bool {
+	r.mu.Lock()
+	claimed := !r.owner
+	if claimed {
+		r.owner = true
+	}
+	r.mu.Unlock()
+
+	if claimed {
+		r.notify()
+	}
+	return claimed
+}
+
+func (r *registry) ReleaseOwner() {
+	r.mu.Lock()
+	r.owner = false
+	r.mu.Unlock()
+
+	r.notify()
+}
+
+func (r *registry) OwnerPresent() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.owner
 }
 
 func (r *registry) Pending() []Request {

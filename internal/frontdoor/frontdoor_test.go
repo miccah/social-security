@@ -30,6 +30,14 @@ type fakeVMTarget struct {
 
 func (f fakeVMTarget) Target() (vm.Target, error) { return f.target, f.err }
 
+// guestRegistry returns a registry with the owner slot already claimed, so a
+// connecting client is treated as a guest rather than the owner.
+func guestRegistry() registry.Registry {
+	reg := registry.New()
+	reg.ClaimOwner()
+	return reg
+}
+
 func genSigner(t *testing.T) gossh.Signer {
 	t.Helper()
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
@@ -309,7 +317,7 @@ func TestGuestJoinAcceptBridges(t *testing.T) {
 	sessionSigner := genSigner(t)
 	vmAddr, rec := newFakeVM(t, sessionSigner.PublicKey())
 
-	reg := registry.New()
+	reg := guestRegistry()
 	target := fakeVMTarget{target: vm.Target{Addr: vmAddr, User: "root", Signer: sessionSigner}}
 	frontAddr := startFrontDoor(t, reg, target)
 
@@ -352,7 +360,7 @@ func TestGuestJoinAcceptBridges(t *testing.T) {
 
 // An empty username defaults to the SSH login username.
 func TestGuestUsernameDefaultsToSSHUser(t *testing.T) {
-	reg := registry.New()
+	reg := guestRegistry()
 	frontAddr := startFrontDoor(t, reg, fakeVMTarget{})
 
 	client := dialGuestAs(t, frontAddr, "frank")
@@ -366,7 +374,7 @@ func TestGuestUsernameDefaultsToSSHUser(t *testing.T) {
 
 // A taken username is rejected and the guest is reprompted until one is free.
 func TestGuestRepromptedOnTakenUsername(t *testing.T) {
-	reg := registry.New()
+	reg := guestRegistry()
 	if _, err := reg.AddPending("alice", "x", "10.0.0.9:1"); err != nil {
 		t.Fatal(err)
 	}
@@ -387,7 +395,7 @@ func TestGuestRepromptedOnTakenUsername(t *testing.T) {
 
 // Declining tells the guest and frees the username.
 func TestGuestDeclined(t *testing.T) {
-	reg := registry.New()
+	reg := guestRegistry()
 	frontAddr := startFrontDoor(t, reg, fakeVMTarget{})
 
 	client := dialGuest(t, frontAddr)
@@ -415,7 +423,7 @@ func TestPendingTimeout(t *testing.T) {
 	pendingTimeout = 200 * time.Millisecond
 	defer func() { pendingTimeout = prev }()
 
-	reg := registry.New()
+	reg := guestRegistry()
 	frontAddr := startFrontDoor(t, reg, fakeVMTarget{})
 
 	client := dialGuest(t, frontAddr)
@@ -434,7 +442,7 @@ func TestPendingTimeout(t *testing.T) {
 
 // A guest that disconnects while pending drops its request and frees the name.
 func TestGuestDisconnectWhilePending(t *testing.T) {
-	reg := registry.New()
+	reg := guestRegistry()
 	frontAddr := startFrontDoor(t, reg, fakeVMTarget{})
 
 	client := dialGuest(t, frontAddr)
@@ -452,7 +460,7 @@ func TestGuestDisconnectWhilePending(t *testing.T) {
 
 // A guest can Ctrl+C out of the queue, which drops the request and frees the name.
 func TestGuestCancelsWithCtrlC(t *testing.T) {
-	reg := registry.New()
+	reg := guestRegistry()
 	frontAddr := startFrontDoor(t, reg, fakeVMTarget{})
 
 	client := dialGuest(t, frontAddr)
@@ -478,7 +486,7 @@ func TestGuestCancelsWithCtrlC(t *testing.T) {
 // An accepted guest whose sandbox is unreachable is told and disconnected, with
 // no session left behind.
 func TestSandboxNotReady(t *testing.T) {
-	reg := registry.New()
+	reg := guestRegistry()
 	frontAddr := startFrontDoor(t, reg, fakeVMTarget{err: errors.New("not started")})
 
 	client := dialGuest(t, frontAddr)
@@ -495,6 +503,51 @@ func TestSandboxNotReady(t *testing.T) {
 	readContains(t, stdout, "sandbox not ready", 5*time.Second)
 	sess.Wait()
 	waitFor(t, 5*time.Second, func() bool { return reg.Count() == 0 }, "active session not cleared")
+}
+
+// The first connection claims the owner slot and is bridged straight in with no
+// ceremony; a later connection is a guest that must queue.
+func TestFirstConnectionIsOwner(t *testing.T) {
+	sessionSigner := genSigner(t)
+	vmAddr, rec := newFakeVM(t, sessionSigner.PublicKey())
+
+	reg := registry.New()
+	target := fakeVMTarget{target: vm.Target{Addr: vmAddr, User: "root", Signer: sessionSigner}}
+	frontAddr := startFrontDoor(t, reg, target)
+
+	owner := dialGuest(t, frontAddr)
+	defer owner.Close()
+	openShell(t, owner) // no prompts: the owner is bridged directly
+
+	waitFor(t, 5*time.Second, func() bool { return rec.cmd() == "tmux new-session -A -s pairing" },
+		"owner was not bridged straight into the pairing session")
+	waitFor(t, 5*time.Second, reg.OwnerPresent, "owner slot not claimed")
+
+	// A second connection is a guest and must run the ceremony.
+	guest := dialGuest(t, frontAddr)
+	defer guest.Close()
+	_, stdin, _ := openShell(t, guest)
+	writeLine(t, stdin, "bob")
+	writeLine(t, stdin, "ssn")
+	awaitPending(t, reg, "bob")
+}
+
+// The owner slot is freed on disconnect, so a later connection can take over.
+func TestOwnerSlotReleasedOnDisconnect(t *testing.T) {
+	sessionSigner := genSigner(t)
+	vmAddr, _ := newFakeVM(t, sessionSigner.PublicKey())
+
+	reg := registry.New()
+	target := fakeVMTarget{target: vm.Target{Addr: vmAddr, User: "root", Signer: sessionSigner}}
+	frontAddr := startFrontDoor(t, reg, target)
+
+	owner := dialGuest(t, frontAddr)
+	openShell(t, owner)
+	waitFor(t, 5*time.Second, reg.OwnerPresent, "owner slot not claimed")
+
+	owner.Close()
+	waitFor(t, 5*time.Second, func() bool { return !reg.OwnerPresent() },
+		"owner slot not released on disconnect")
 }
 
 // A failed bind aborts Start with an error rather than serving.

@@ -342,10 +342,10 @@ the base applied last so its security-critical settings win:
 
 ## 11. Open questions
 
-1. **Owner identity.** Is "connected via LAN" sufficient to grant owner powers, or do
-   we need a one-time token printed at startup? On a shared LAN, anyone could reach the
-   LAN listener. Simplest hardening: bind owner listener to loopback + require the
-   startup token.
+1. **Owner identity.** Resolved: the first connection to claim the owner slot is the
+   owner (bridged straight in, no ceremony); every later connection is a guest. The slot
+   is freed on owner disconnect. This assumes the owner connects first over the LAN; a
+   one-time startup token remains an option if that assumption needs hardening.
 2. **Username source.** Resolved: the ceremony prompts interactively, defaulting to the
    SSH username (`ssh alice@endpoint`) and allowing an override, so a collision is a
    reprompt rather than a reconnect.

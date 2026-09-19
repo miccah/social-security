@@ -158,80 +158,111 @@ func hostKeyPath() (string, error) {
 	return path, nil
 }
 
-// joinMiddleware handles each connection: run the join ceremony, wait for the
-// owner's decision, and bridge an accepted guest into the shared tmux. It
-// ignores next because the front door is the terminal handler, not a link in a
-// chain.
+// joinMiddleware handles each connection: the first claims the owner slot and is
+// bridged straight into the shared tmux; every later connection is a guest that
+// runs the join ceremony. It ignores next because the front door is the terminal
+// handler, not a link in a chain.
 func (m *manager) joinMiddleware(ssh.Handler) ssh.Handler {
 	return func(s ssh.Session) {
-		remote := s.RemoteAddr().String()
 		if _, _, ok := s.Pty(); !ok {
 			fmt.Fprint(s.Stderr(), "sssh: a terminal is required (connect with: ssh -t)\r\n")
 			s.Exit(1)
 			return
 		}
-
-		t := term.NewTerminal(s, "")
-		req, err := m.join(s, t)
-		if err != nil {
-			// The guest disconnected before submitting a request; nothing to clean.
-			slog.Info("frontdoor: join abandoned", "remote", remote, "err", err)
+		if m.reg.ClaimOwner() {
+			m.serveOwner(s)
 			return
 		}
-		slog.Info("frontdoor: join requested", "id", req.ID, "user", req.Username, "remote", remote,
-			"pending", len(m.reg.Pending()))
+		m.serveGuest(s)
+	}
+}
 
-		// Pump guest input so a Ctrl+C can cancel the request while queued; once
-		// accepted, the same stream feeds the bridge (one reader of the session).
-		pr, pw := io.Pipe()
-		var waiting atomic.Bool
-		waiting.Store(true)
-		interrupt := make(chan struct{}, 1)
-		go pumpInput(s, pw, &waiting, interrupt)
+// serveOwner bridges the owner straight into the shared tmux, with no ceremony
+// and no input interception, so Ctrl+C reaches the session. The owner slot is
+// released on disconnect, letting a later connection take over.
+func (m *manager) serveOwner(s ssh.Session) {
+	defer m.reg.ReleaseOwner()
+	remote := s.RemoteAddr().String()
+	slog.Info("frontdoor: owner connected", "remote", remote)
+	defer slog.Info("frontdoor: owner disconnected", "remote", remote)
 
-		fmt.Fprint(s, "waiting for the owner to approve… (ctrl-c to cancel)\r\n")
-		select {
-		case d := <-req.Decision():
-			if d == registry.Decline {
-				fmt.Fprint(s, "request declined\r\n")
-				s.Exit(1)
-				return
-			}
-		case <-interrupt:
-			m.reg.CancelPending(req.ID)
-			fmt.Fprint(s, "cancelled\r\n")
-			s.Exit(130) // 128 + SIGINT
-			return
-		case <-time.After(pendingTimeout):
-			m.reg.CancelPending(req.ID)
-			fmt.Fprint(s, "request timed out\r\n")
+	target, err := m.vm.Target()
+	if err != nil {
+		slog.Error("frontdoor: sandbox not ready", "err", err)
+		fmt.Fprint(s, "sssh: sandbox not ready\r\n")
+		s.Exit(1)
+		return
+	}
+	if err := bridge.New(target, s, s).Run(s.Context()); err != nil {
+		slog.Error("frontdoor: owner bridge ended", "err", err)
+		s.Exit(1)
+	}
+}
+
+// serveGuest runs the join ceremony, waits for the owner's decision, and bridges
+// an accepted guest into the shared tmux.
+func (m *manager) serveGuest(s ssh.Session) {
+	remote := s.RemoteAddr().String()
+	t := term.NewTerminal(s, "")
+	req, err := m.join(s, t)
+	if err != nil {
+		// The guest disconnected before submitting a request; nothing to clean.
+		slog.Info("frontdoor: join abandoned", "remote", remote, "err", err)
+		return
+	}
+	slog.Info("frontdoor: join requested", "id", req.ID, "user", req.Username, "remote", remote,
+		"pending", len(m.reg.Pending()))
+
+	// Pump guest input so a Ctrl+C can cancel the request while queued; once
+	// accepted, the same stream feeds the bridge (one reader of the session).
+	pr, pw := io.Pipe()
+	var waiting atomic.Bool
+	waiting.Store(true)
+	interrupt := make(chan struct{}, 1)
+	go pumpInput(s, pw, &waiting, interrupt)
+
+	fmt.Fprint(s, "waiting for the owner to approve… (ctrl-c to cancel)\r\n")
+	select {
+	case d := <-req.Decision():
+		if d == registry.Decline {
+			fmt.Fprint(s, "request declined\r\n")
 			s.Exit(1)
 			return
-		case <-s.Context().Done():
-			m.reg.CancelPending(req.ID)
-			return
 		}
-		waiting.Store(false) // Ctrl+C now passes through to the shared session
+	case <-interrupt:
+		m.reg.CancelPending(req.ID)
+		fmt.Fprint(s, "cancelled\r\n")
+		s.Exit(130) // 128 + SIGINT
+		return
+	case <-time.After(pendingTimeout):
+		m.reg.CancelPending(req.ID)
+		fmt.Fprint(s, "request timed out\r\n")
+		s.Exit(1)
+		return
+	case <-s.Context().Done():
+		m.reg.CancelPending(req.ID)
+		return
+	}
+	waiting.Store(false) // Ctrl+C now passes through to the shared session
 
-		sess := m.reg.Activate(req, func() { s.Close() })
-		slog.Info("frontdoor: guest accepted", "id", sess.ID, "user", sess.Username, "active", m.reg.Count())
-		defer func() {
-			m.reg.RemoveActive(sess.ID)
-			slog.Info("frontdoor: guest disconnected", "id", sess.ID, "user", sess.Username, "active", m.reg.Count())
-		}()
+	sess := m.reg.Activate(req, func() { s.Close() })
+	slog.Info("frontdoor: guest accepted", "id", sess.ID, "user", sess.Username, "active", m.reg.Count())
+	defer func() {
+		m.reg.RemoveActive(sess.ID)
+		slog.Info("frontdoor: guest disconnected", "id", sess.ID, "user", sess.Username, "active", m.reg.Count())
+	}()
 
-		target, err := m.vm.Target()
-		if err != nil {
-			slog.Error("frontdoor: sandbox not ready", "err", err)
-			fmt.Fprint(s, "sssh: sandbox not ready\r\n")
-			s.Exit(1)
-			return
-		}
-		if err := bridge.New(target, s, pr).Run(s.Context()); err != nil {
-			slog.Error("frontdoor: bridge ended", "id", sess.ID, "err", err)
-			s.Exit(1)
-			return
-		}
+	target, err := m.vm.Target()
+	if err != nil {
+		slog.Error("frontdoor: sandbox not ready", "err", err)
+		fmt.Fprint(s, "sssh: sandbox not ready\r\n")
+		s.Exit(1)
+		return
+	}
+	if err := bridge.New(target, s, pr).Run(s.Context()); err != nil {
+		slog.Error("frontdoor: bridge ended", "id", sess.ID, "err", err)
+		s.Exit(1)
+		return
 	}
 }
 
