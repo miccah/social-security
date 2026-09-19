@@ -15,6 +15,13 @@ func TestTargetBeforeStart(t *testing.T) {
 	}
 }
 
+// SharePath is only valid after Start has created the runtime dir.
+func TestSharePathBeforeStart(t *testing.T) {
+	if _, err := New("/tmp/project").SharePath(); err == nil {
+		t.Fatal("SharePath() should error before Start")
+	}
+}
+
 // freeLoopbackPort returns a real, currently free loopback port.
 func TestFreeLoopbackPort(t *testing.T) {
 	p, err := freeLoopbackPort()

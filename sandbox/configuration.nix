@@ -16,6 +16,7 @@
     "${modulesPath}/virtualisation/qemu-vm.nix"
     ./owner-env.nix
     ./toolchain.nix
+    ./git.nix
   ];
 
   networking.hostName = "sandbox";

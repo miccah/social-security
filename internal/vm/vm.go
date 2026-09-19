@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -54,6 +55,10 @@ type Manager interface {
 	// Target returns how to reach the guest sshd. It is valid only after Start
 	// has returned successfully.
 	Target() (Target, error)
+
+	// SharePath returns the host directory shared into the guest at /tmp/shared.
+	// It is valid only after Start has created it.
+	SharePath() (string, error)
 }
 
 // manager boots one sandbox VM under QEMU and holds the handle the rest of sssh
@@ -103,6 +108,15 @@ func (m *manager) Start(ctx context.Context) error {
 	}()
 
 	if err := m.generateKey(ctx); err != nil {
+		return err
+	}
+
+	// Stage everything the guest reads at boot into the share before launch: the
+	// owner's git identity (commit author) and the sssh binary the git hooks run.
+	if err := m.stageGitIdentity(ctx); err != nil {
+		return err
+	}
+	if err := m.stageHelper(); err != nil {
 		return err
 	}
 
@@ -209,6 +223,64 @@ func (m *manager) Target() (Target, error) {
 		User:   vmUser,
 		Signer: m.signer,
 	}, nil
+}
+
+// shareDir is the host directory shared into the guest at /tmp/shared.
+func (m *manager) shareDir() string { return filepath.Join(m.runtimeDir, "share") }
+
+// SharePath returns the host share directory. It errors until Start has created
+// the runtime dir.
+func (m *manager) SharePath() (string, error) {
+	if m.runtimeDir == "" {
+		return "", errors.New("vm: sandbox not started")
+	}
+	return m.shareDir(), nil
+}
+
+// stageGitIdentity records the owner's host git identity into the share so the
+// guest can author commits as the owner. A field git does not report is skipped;
+// a project with no configured identity stages nothing, and commits fall back to
+// git's defaults.
+func (m *manager) stageGitIdentity(ctx context.Context) error {
+	for field, file := range map[string]string{"user.name": "git.name", "user.email": "git.email"} {
+		out, err := exec.CommandContext(ctx, "git", "-C", m.projectDir, "config", "--get", field).Output()
+		if err != nil {
+			continue
+		}
+		val := strings.TrimSpace(string(out))
+		if val == "" {
+			continue
+		}
+		if err := os.WriteFile(filepath.Join(m.shareDir(), file), []byte(val), 0o644); err != nil {
+			return fmt.Errorf("stage %s: %w", file, err)
+		}
+	}
+	return nil
+}
+
+// stageHelper copies the running sssh binary into the share so the guest's git
+// hooks can run it as the commit helper. The binary is pure Go and statically
+// linked, so it runs in the guest without further dependencies.
+func (m *manager) stageHelper() error {
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("locate sssh binary: %w", err)
+	}
+	src, err := os.Open(exe)
+	if err != nil {
+		return fmt.Errorf("open sssh binary: %w", err)
+	}
+	defer src.Close()
+	dst := filepath.Join(m.shareDir(), "sssh")
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+	if err != nil {
+		return fmt.Errorf("stage sssh binary: %w", err)
+	}
+	defer out.Close()
+	if _, err := io.Copy(out, src); err != nil {
+		return fmt.Errorf("copy sssh binary: %w", err)
+	}
+	return nil
 }
 
 // launch starts the QEMU run script. The script boots the guest, forwards

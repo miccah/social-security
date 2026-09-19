@@ -106,20 +106,20 @@ composed (base + owner environment + project toolchain), not a fixed image (DESI
 
 **Goal:** the live project is in the VM; commits work from inside, push is disabled.
 
-- [ ] The host project directory is mounted read/write into the VM; an edit made in
+- [x] The host project directory is mounted read/write into the VM; an edit made in
       the session appears on the host live (no copy-in, no write-back).
-- [ ] For a git repo, the VM's git config carries the owner's identity, so a commit
+- [x] For a git repo, the VM's git config carries the owner's identity, so a commit
       made in the session is authored by the owner.
-- [ ] The commit helper generates the template from the currently connected users,
+- [x] The commit helper generates the template from the currently connected users,
       emitting a `Co-authored-by: <username> <email>` line for each.
-- [ ] The commit helper parses a completed commit to capture a user's email on their
+- [x] The commit helper parses a completed commit to capture a user's email on their
       first commit (a session with no commits never asks) and maps it to their SSH
       username.
-- [ ] A captured email is reused by later commits without reprompting; the template
+- [x] A captured email is reused by later commits without reprompting; the template
       updates as users connect and disconnect.
-- [ ] `git push` from inside the session fails for everyone (no push credentials, and a
+- [x] `git push` from inside the session fails for everyone (no push credentials, and a
       pre-push hook rejects it).
-- [ ] A non-git project mounts and is editable without requiring git setup.
+- [x] A non-git project mounts and is editable without requiring git setup.
 
 ## M7 — Lifecycle hardening
 
