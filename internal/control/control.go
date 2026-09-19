@@ -167,12 +167,16 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	switch msg.String() {
 	case "q":
-		// Quitting ends the session for everyone, so confirm first.
+		// Quitting ends the session for everyone, so confirm first (if there are
+		// any users).
+		if m.reg.Count() == 0 {
+			return m, tea.Quit
+		}
 		m.confirmingQuit = true
 		return m, nil
 	case "ctrl+c":
 		// Ctrl+C is an immediate break; do not confirm.
-		return m, nil
+		return m, tea.Quit
 	case "up", "k":
 		if m.cursor > 0 {
 			m.cursor--
