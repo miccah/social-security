@@ -65,10 +65,15 @@ type Registry interface {
 	// CancelPending drops a still-pending request and frees its username. It is a
 	// no-op once the request is gone (already resolved or cancelled).
 	CancelPending(id string)
-	// Activate promotes an accepted request to an active session.
-	Activate(req *Request) Session
+	// Activate promotes an accepted request to an active session. onKick is called
+	// by Kick to close the connection; the front door's teardown then frees the
+	// username via RemoveActive.
+	Activate(req *Request, onKick func()) Session
 	// RemoveActive drops an active session and frees its username.
 	RemoveActive(id string)
+	// Kick closes an active session by invoking its on-kick callback. An unknown
+	// ID returns an error.
+	Kick(id string) error
 
 	// Pending returns a snapshot of the waiting requests, oldest first.
 	Pending() []Request
@@ -76,6 +81,9 @@ type Registry interface {
 	Active() []Session
 	// Count returns the number of active sessions.
 	Count() int
+	// Events signals that pending or active state changed. Sends are coalesced, so
+	// a receiver that misses one still sees the latest state on its next read.
+	Events() <-chan struct{}
 }
 
 type registry struct {
@@ -84,6 +92,8 @@ type registry struct {
 	names   map[string]struct{} // usernames claimed by a pending request or an active session
 	pending map[string]*Request
 	active  map[string]Session
+	kicks   map[string]func() // per active session, invoked by Kick
+	events  chan struct{}
 }
 
 // New returns an empty session registry.
@@ -92,6 +102,8 @@ func New() Registry {
 		names:   make(map[string]struct{}),
 		pending: make(map[string]*Request),
 		active:  make(map[string]Session),
+		kicks:   make(map[string]func()),
+		events:  make(chan struct{}, 1),
 	}
 }
 
@@ -106,8 +118,8 @@ func (r *registry) Stop(context.Context) error { return nil }
 
 func (r *registry) AddPending(username, ssn, remoteAddr string) (*Request, error) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if _, taken := r.names[username]; taken {
+		r.mu.Unlock()
 		return nil, ErrUsernameTaken
 	}
 	r.nextID++
@@ -121,14 +133,17 @@ func (r *registry) AddPending(username, ssn, remoteAddr string) (*Request, error
 	}
 	r.names[username] = struct{}{}
 	r.pending[req.ID] = req
+	r.mu.Unlock()
+
+	r.notify()
 	return req, nil
 }
 
 func (r *registry) Resolve(id string, d Decision) error {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	req, ok := r.pending[id]
 	if !ok {
+		r.mu.Unlock()
 		return fmt.Errorf("registry: no pending request %q", id)
 	}
 	delete(r.pending, id)
@@ -136,21 +151,28 @@ func (r *registry) Resolve(id string, d Decision) error {
 		delete(r.names, req.Username)
 	}
 	req.decision <- d // buffered(1): never blocks, even if the handler has gone
+	r.mu.Unlock()
+
+	r.notify()
 	return nil
 }
 
 func (r *registry) CancelPending(id string) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	if req, ok := r.pending[id]; ok {
+	req, ok := r.pending[id]
+	if ok {
 		delete(r.pending, id)
 		delete(r.names, req.Username)
 	}
+	r.mu.Unlock()
+
+	if ok {
+		r.notify()
+	}
 }
 
-func (r *registry) Activate(req *Request) Session {
+func (r *registry) Activate(req *Request, onKick func()) Session {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	s := Session{
 		ID:          req.ID,
 		Username:    req.Username,
@@ -158,16 +180,38 @@ func (r *registry) Activate(req *Request) Session {
 		ConnectedAt: time.Now(),
 	}
 	r.active[s.ID] = s // the username stays claimed from AddPending
+	r.kicks[s.ID] = onKick
+	r.mu.Unlock()
+
+	r.notify()
 	return s
 }
 
 func (r *registry) RemoveActive(id string) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	if s, ok := r.active[id]; ok {
+	s, ok := r.active[id]
+	if ok {
 		delete(r.active, id)
+		delete(r.kicks, id)
 		delete(r.names, s.Username)
 	}
+	r.mu.Unlock()
+
+	if ok {
+		r.notify()
+	}
+}
+
+func (r *registry) Kick(id string) error {
+	r.mu.Lock()
+	onKick, ok := r.kicks[id]
+	r.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("registry: no active session %q", id)
+	}
+	onKick() // closes the connection; the front door frees the name via RemoveActive
+	r.notify()
+	return nil
 }
 
 func (r *registry) Pending() []Request {
@@ -196,4 +240,14 @@ func (r *registry) Count() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return len(r.active)
+}
+
+func (r *registry) Events() <-chan struct{} { return r.events }
+
+// notify coalesces a state-change signal onto the events channel.
+func (r *registry) notify() {
+	select {
+	case r.events <- struct{}{}:
+	default:
+	}
 }

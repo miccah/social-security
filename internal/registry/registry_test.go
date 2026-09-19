@@ -35,7 +35,7 @@ func TestPendingAcceptActivate(t *testing.T) {
 		t.Fatal("request should leave pending once resolved")
 	}
 
-	sess := r.Activate(req)
+	sess := r.Activate(req, func() {})
 	if sess.Username != "alice" {
 		t.Fatalf("session username = %q, want alice", sess.Username)
 	}
@@ -103,6 +103,43 @@ func TestCancelPendingAndUnknownResolve(t *testing.T) {
 	r.CancelPending("no-such-id") // must not panic
 }
 
+// Kick invokes the session's on-kick callback; an unknown session errors.
+func TestKickInvokesCallback(t *testing.T) {
+	r := New()
+	req, _ := r.AddPending("erin", "1", "a")
+	if err := r.Resolve(req.ID, Accept); err != nil {
+		t.Fatal(err)
+	}
+	<-req.Decision()
+	called := make(chan struct{}, 1)
+	sess := r.Activate(req, func() { called <- struct{}{} })
+
+	if err := r.Kick(sess.ID); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-called:
+	default:
+		t.Fatal("Kick should invoke onKick")
+	}
+	if err := r.Kick("no-such-id"); err == nil {
+		t.Fatal("Kick of an unknown session should error")
+	}
+}
+
+// A state change signals the events channel.
+func TestEventsSignalOnChange(t *testing.T) {
+	r := New()
+	if _, err := r.AddPending("frank", "1", "a"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-r.Events():
+	case <-time.After(time.Second):
+		t.Fatal("AddPending should signal Events")
+	}
+}
+
 // Pending is returned oldest first.
 func TestPendingOrder(t *testing.T) {
 	r := New()
@@ -133,7 +170,7 @@ func TestConcurrentAccess(t *testing.T) {
 			_ = r.Count()
 			if err := r.Resolve(req.ID, Accept); err == nil {
 				<-req.Decision()
-				sess := r.Activate(req)
+				sess := r.Activate(req, func() {})
 				r.RemoveActive(sess.ID)
 			}
 		}(i)

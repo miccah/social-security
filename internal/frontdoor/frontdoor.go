@@ -43,6 +43,9 @@ var pendingTimeout = 2 * time.Minute
 // Manager runs the SSH front door and bridges accepted sessions.
 type Manager interface {
 	lifecycle.Manager
+
+	// Addr returns the bound listen address. It is valid after Start.
+	Addr() string
 }
 
 // vmTarget is the slice of the VM manager the front door needs: how to reach the
@@ -68,6 +71,14 @@ func New(reg registry.Registry, vmm vmTarget) Manager {
 }
 
 func (m *manager) Name() string { return "frontdoor" }
+
+// Addr returns the bound listen address, or "" before Start has bound one.
+func (m *manager) Addr() string {
+	if m.ln == nil {
+		return ""
+	}
+	return m.ln.Addr().String()
+}
 
 // Start binds the listener synchronously (so a bind failure aborts startup) and
 // serves on a goroutine (so Start does not block for the server's lifetime).
@@ -185,7 +196,7 @@ func (m *manager) joinMiddleware(ssh.Handler) ssh.Handler {
 		}
 		waiting.Store(false) // Ctrl+C now passes through to the shared session
 
-		sess := m.reg.Activate(req)
+		sess := m.reg.Activate(req, func() { s.Close() })
 		slog.Info("frontdoor: guest accepted", "id", sess.ID, "user", sess.Username, "active", m.reg.Count())
 		defer func() {
 			m.reg.RemoveActive(sess.ID)
