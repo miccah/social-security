@@ -30,7 +30,6 @@ This document describes the functional requirements of this project.
   must disconnect, as the end of the session
 * The server closes the ngrok tunnel
 * Project edits are made directly on the host directory, live during the session
-* If the project is a git repo, changes can also be pushed to the upstream remote
 
 
 ### Owner
@@ -47,6 +46,11 @@ As the owner,
 * I want the project's toolchain available so we can build and run what we edit
 * I want the user to share their SSN out-of-band to confirm I am accepting the
   correct user
+* I want to be able to make commits in the git repository I own
+* I want git push permissions revoked for everyone
+* I want my git identity reflected in commit
+* I want the git commit template to automatically add 'Co-authored-by: username
+  <email>' for each user attached
 
 
 ### User
@@ -56,6 +60,11 @@ As a user,
 * I don't want to install any special programs on my client
 * I want to be able to use my own username
 * I want to input any SSN I want
+* I want my git identity reflected as a co-author in commits
+* I only want to input my email during the first commit, so if no commits are
+  made, I did not have to share my email
+* I want the git commit template to update with my email, so subsequent commits
+  remembers
 
 
 ## Non-functional requirements
@@ -63,14 +72,13 @@ As a user,
 * A transient disconnect on the owner's connection ends the session for
   everyone
 * A kicked user is allowed to attempt to reconnect
-* When the project is a git repo, the owner's git credentials are part of the VM
-  to allow committing and pushing (by any user)
+* The owner's git identity is part of the VM to allow authored commits
+  (by any user)
 
 
 ## Definitions
 
-* A project is any directory; it may optionally be a git repo, which enables
-  committing and pushing to the upstream remote
+* A project is any directory
 * A sandbox is an environment where users can modify files freely without
   harming the system (in a NixOS VM)
     * The sandbox is composed from the owner's system configuration and the
