@@ -346,9 +346,9 @@ the base applied last so its security-critical settings win:
    we need a one-time token printed at startup? On a shared LAN, anyone could reach the
    LAN listener. Simplest hardening: bind owner listener to loopback + require the
    startup token.
-2. **Username source.** Interactive prompt (allows reprompt on collision, per PRD) vs.
-   the SSH username (`ssh alice@endpoint`, but collision means reconnect). Design assumes
-   interactive prompt; confirm.
+2. **Username source.** Resolved: the ceremony prompts interactively, defaulting to the
+   SSH username (`ssh alice@endpoint`) and allowing an override, so a collision is a
+   reprompt rather than a reconnect.
 3. **SSN semantics.** Purely displayed for out-of-band matching — any format/length
    rules? What if two pending requests share an SSN?
 4. **VM boot latency.** Cold-booting NixOS per session may take tens of seconds, and the
