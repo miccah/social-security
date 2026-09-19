@@ -11,6 +11,22 @@ import (
 
 func key(r rune) tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}} }
 
+// regWithActive returns a registry holding one active session, so Count() > 0.
+func regWithActive(t *testing.T) registry.Registry {
+	t.Helper()
+	reg := registry.New()
+	req, err := reg.AddPending("alice", "1", "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Resolve(req.ID, registry.Accept); err != nil {
+		t.Fatal(err)
+	}
+	<-req.Decision()
+	reg.Activate(req, func() {})
+	return reg
+}
+
 // Pressing 'a' accepts the selected pending request.
 func TestAcceptResolvesSelectedPending(t *testing.T) {
 	reg := registry.New()
@@ -118,13 +134,13 @@ func TestBellOnNewPending(t *testing.T) {
 	}
 }
 
-// Quitting asks for confirmation first, then y ends the session.
-func TestQuitRequiresConfirmation(t *testing.T) {
-	m := newModel(registry.New(), "x")
+// With users present, quitting asks for confirmation first, then y ends it.
+func TestQuitConfirmsWhenUsersPresent(t *testing.T) {
+	m := newModel(regWithActive(t), "x")
 
 	next, cmd := m.Update(key('q'))
 	if cmd != nil {
-		t.Fatal("q alone should prompt, not quit")
+		t.Fatal("q should prompt, not quit, while users are present")
 	}
 	m = next.(model)
 	if !m.confirmingQuit {
@@ -142,10 +158,13 @@ func TestQuitRequiresConfirmation(t *testing.T) {
 
 // Declining the confirmation returns to the control plane without quitting.
 func TestQuitCanceled(t *testing.T) {
-	m := newModel(registry.New(), "x")
+	m := newModel(regWithActive(t), "x")
 
 	next, _ := m.Update(key('q'))
 	m = next.(model)
+	if !m.confirmingQuit {
+		t.Fatal("q should enter quit confirmation while users are present")
+	}
 
 	next, cmd := m.Update(key('n'))
 	if cmd != nil {
@@ -153,5 +172,17 @@ func TestQuitCanceled(t *testing.T) {
 	}
 	if next.(model).confirmingQuit {
 		t.Fatal("declining should leave confirmation mode")
+	}
+}
+
+// With no one connected, quitting is immediate (nothing to confirm).
+func TestQuitImmediateWhenEmpty(t *testing.T) {
+	m := newModel(registry.New(), "x")
+	_, cmd := m.Update(key('q'))
+	if cmd == nil {
+		t.Fatal("q should quit immediately when no one is connected")
+	}
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Fatal("q should return tea.Quit when empty")
 	}
 }

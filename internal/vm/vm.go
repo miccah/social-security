@@ -1,8 +1,8 @@
 // Package vm manages the NixOS sandbox VM: it builds and boots a composed VM (a
 // base from sssh's own flake, the owner's editor/shell/tmux borrowed from the
 // host, and the project's flake toolchain entered at session start), waits for
-// sshd on the host-only NIC, mounts the project directory read/write, snapshots
-// the disk, and GCs snapshots older than 7 days.
+// sshd on the host-only NIC, mounts the project directory read/write, and tears
+// the VM down on stop.
 package vm
 
 import (

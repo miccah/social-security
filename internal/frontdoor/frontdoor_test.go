@@ -62,11 +62,15 @@ func freeAddr(t *testing.T) string {
 }
 
 func startFrontDoor(t *testing.T, reg registry.Registry, vmm vmTarget) string {
+	return startFrontDoorQuit(t, reg, vmm, func() {})
+}
+
+func startFrontDoorQuit(t *testing.T, reg registry.Registry, vmm vmTarget, quit func()) string {
 	t.Helper()
 	addr := freeAddr(t)
 	t.Setenv(addrEnv, addr)
 	t.Setenv(hostKeyEnv, filepath.Join(t.TempDir(), "host_ed25519"))
-	fd := New(reg, vmm)
+	fd := New(reg, vmm, quit)
 	if err := fd.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -550,11 +554,67 @@ func TestOwnerSlotReleasedOnDisconnect(t *testing.T) {
 		"owner slot not released on disconnect")
 }
 
+// The owner disconnecting ends the session for everyone.
+func TestOwnerDisconnectEndsSession(t *testing.T) {
+	sessionSigner := genSigner(t)
+	vmAddr, _ := newFakeVM(t, sessionSigner.PublicKey())
+
+	reg := registry.New()
+	target := fakeVMTarget{target: vm.Target{Addr: vmAddr, User: "root", Signer: sessionSigner}}
+	ended := make(chan struct{}, 1)
+	frontAddr := startFrontDoorQuit(t, reg, target, func() { ended <- struct{}{} })
+
+	owner := dialGuest(t, frontAddr)
+	openShell(t, owner)
+	waitFor(t, 5*time.Second, reg.OwnerPresent, "owner slot not claimed")
+
+	owner.Close()
+	select {
+	case <-ended:
+	case <-time.After(5 * time.Second):
+		t.Fatal("owner disconnect should end the session")
+	}
+}
+
+// A guest disconnecting frees its slot and username but leaves the session up.
+func TestGuestDisconnectKeepsSession(t *testing.T) {
+	sessionSigner := genSigner(t)
+	vmAddr, rec := newFakeVM(t, sessionSigner.PublicKey())
+
+	reg := registry.New()
+	reg.ClaimOwner() // an owner is present
+	target := fakeVMTarget{target: vm.Target{Addr: vmAddr, User: "root", Signer: sessionSigner}}
+	ended := make(chan struct{}, 1)
+	frontAddr := startFrontDoorQuit(t, reg, target, func() { ended <- struct{}{} })
+
+	guest := dialGuest(t, frontAddr)
+	_, stdin, _ := openShell(t, guest)
+	writeLine(t, stdin, "bob")
+	writeLine(t, stdin, "ssn")
+	req := awaitPending(t, reg, "bob")
+	if err := reg.Resolve(req.ID, registry.Accept); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 5*time.Second, func() bool { return rec.cmd() == "tmux new-session -A -s pairing" }, "guest not bridged")
+	waitFor(t, 5*time.Second, func() bool { return reg.Count() == 1 }, "guest not active")
+
+	guest.Close()
+	waitFor(t, 5*time.Second, func() bool { return reg.Count() == 0 }, "guest not removed")
+	if _, err := reg.AddPending("bob", "x", "y"); err != nil {
+		t.Fatalf("username should be free after a guest drop: %v", err)
+	}
+	select {
+	case <-ended:
+		t.Fatal("a guest disconnect must not end the session")
+	default:
+	}
+}
+
 // A failed bind aborts Start with an error rather than serving.
 func TestStartBindError(t *testing.T) {
 	t.Setenv(addrEnv, "127.0.0.1:99999") // out-of-range port
 	t.Setenv(hostKeyEnv, filepath.Join(t.TempDir(), "host_ed25519"))
-	fd := New(registry.New(), fakeVMTarget{})
+	fd := New(registry.New(), fakeVMTarget{}, func() {})
 	if err := fd.Start(context.Background()); err == nil {
 		fd.Stop(context.Background())
 		t.Fatal("Start should error on an unbindable address")
@@ -595,7 +655,7 @@ func frontDoorHostKey(t *testing.T, keyPath string) string {
 	addr := freeAddr(t)
 	t.Setenv(addrEnv, addr)
 	t.Setenv(hostKeyEnv, keyPath)
-	fd := New(registry.New(), fakeVMTarget{})
+	fd := New(registry.New(), fakeVMTarget{}, func() {})
 	if err := fd.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}

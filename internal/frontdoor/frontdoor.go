@@ -59,17 +59,19 @@ type vmTarget interface {
 }
 
 type manager struct {
-	reg registry.Registry
-	vm  vmTarget
+	reg        registry.Registry
+	vm         vmTarget
+	endSession func() // called when the owner disconnects, to end the whole session
 
 	srv *ssh.Server
 	ln  net.Listener
 }
 
 // New returns a front door that bridges LAN sessions into the VM's shared tmux,
-// tracking each connection in the registry.
-func New(reg registry.Registry, vmm vmTarget) Manager {
-	return &manager{reg: reg, vm: vmm}
+// tracking each connection in the registry. endSession is called when the owner
+// disconnects, to tear down the session for everyone.
+func New(reg registry.Registry, vmm vmTarget, endSession func()) Manager {
+	return &manager{reg: reg, vm: vmm, endSession: endSession}
 }
 
 func (m *manager) Name() string { return "frontdoor" }
@@ -178,9 +180,11 @@ func (m *manager) joinMiddleware(ssh.Handler) ssh.Handler {
 }
 
 // serveOwner bridges the owner straight into the shared tmux, with no ceremony
-// and no input interception, so Ctrl+C reaches the session. The owner slot is
-// released on disconnect, letting a later connection take over.
+// and no input interception. When this method returns, all sessions will be
+// closed.
 func (m *manager) serveOwner(s ssh.Session) {
+	// The owner leaving ends the session for everyone.
+	defer m.endSession()
 	defer m.reg.ReleaseOwner()
 	remote := s.RemoteAddr().String()
 	slog.Info("frontdoor: owner connected", "remote", remote)
