@@ -208,10 +208,10 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.cursor++
 		}
 	case "a":
-		// Guests may only be approved once the owner is in the session, so the
-		// owner is present the moment anyone is admitted. Read the registry
-		// directly so the gate is authoritative, not a stale snapshot. Declining
-		// is always allowed.
+		// Guests may only be approved once the owner is in the session; the
+		// registry enforces that in Resolve. This pre-gate reads live owner state
+		// (not the cached snapshot) so the UI never offers an accept the registry
+		// would refuse. Declining is always allowed.
 		if m.reg.OwnerPresent() {
 			m.resolveSelected(registry.Accept)
 		}
@@ -245,7 +245,9 @@ func (m model) selected() (row, bool) {
 
 func (m model) resolveSelected(d registry.Decision) {
 	if r, ok := m.selected(); ok && r.pending {
-		m.reg.Resolve(r.id, d)
+		if err := m.reg.Resolve(r.id, d); err != nil {
+			slog.Debug("control: resolve failed", "id", r.id, "err", err)
+		}
 	}
 }
 
@@ -290,14 +292,14 @@ func (m *model) refresh() (grewWaiting bool) {
 func (m model) View() string {
 	var b strings.Builder
 	b.WriteString("sssh control\n\n")
-	b.WriteString("guest connect:  " + m.guestConnect + "\n")
-	b.WriteString("owner connect:  " + m.ownerConnect + "\n")
+	fmt.Fprintf(&b, "%-15s %s\n", "guest connect:", m.guestConnect)
+	fmt.Fprintf(&b, "%-15s %s\n", "owner connect:", m.ownerConnect)
 
 	ownerStatus := "awaiting connection"
 	if m.ownerPresent {
 		ownerStatus = "joined"
 	}
-	fmt.Fprintf(&b, "owner:          %s\n\n", ownerStatus)
+	fmt.Fprintf(&b, "%-15s %s\n\n", "owner:", ownerStatus)
 
 	waiting := 0
 	for _, r := range m.rows {
