@@ -3,11 +3,9 @@
 # develop`. Edits are live on the host. A project with no flake falls back to the
 # owner's login shell. The host Nix store is shared by qemu-vm.nix, so inputs the
 # owner has already built resolve without a rebuild.
-{ pkgs, ... }:
+{ pkgs, projectDir, ... }:
 
 let
-  projectDir = "/root/project";
-
   # The command every pairing pane runs. It enters the project's dev shell when
   # the project has a flake, and otherwise starts the owner's login shell. Kept
   # in tmux's default-command so it applies to the first pane and to any window

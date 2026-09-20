@@ -23,6 +23,12 @@
       inherit system;
       configuration = /etc/nixos/configuration.nix;
     }).config;
+
+    # The guest path the project is mounted at. The VM manager passes it
+    # impurely (SSSH_PROJECT_DIR) so the mount mirrors the host directory name;
+    # a direct build falls back to the generic path.
+    projectDir = let d = builtins.getEnv "SSSH_PROJECT_DIR";
+                 in if d != "" then d else "/root/project";
   in {
     devShells.${system}.default = pkgs.mkShell {
       packages = with pkgs; [
@@ -41,6 +47,7 @@
       modules = [
         ./sandbox/configuration.nix
         { _module.args.hostConfig = hostConfig; }
+        { _module.args.projectDir = projectDir; }
       ];
     };
   };

@@ -33,6 +33,11 @@ import (
 // sandboxFlakeEnv overrides the flake reference the sandbox is built from.
 const sandboxFlakeEnv = "SSSH_SANDBOX_FLAKE"
 
+// projectMountEnv passes the guest project mount point into the impure sandbox
+// build (read by flake.nix), so the project lands at /root/<host dir name>
+// instead of a generic default.
+const projectMountEnv = "SSSH_PROJECT_DIR"
+
 // vmUser is the guest account clients log in as. The sandbox grants full access
 // inside, so a single shared login is enough.
 const vmUser = "root"
@@ -90,7 +95,7 @@ func (m *manager) Name() string { return "vm" }
 func (m *manager) Start(ctx context.Context) error {
 	slog.Info("vm: booting sandbox", "project", m.projectDir)
 
-	runScript, err := buildRunScript(ctx)
+	runScript, err := buildRunScript(ctx, m.mountDir())
 	if err != nil {
 		return fmt.Errorf("build sandbox vm: %w", err)
 	}
@@ -151,7 +156,7 @@ func (m *manager) Stop(context.Context) error {
 // disk. The build is impure: the owner-environment layer reads the host's
 // <nixpkgs> and /etc/nixos to borrow the owner's editor, shell, and tmux (see
 // flake.nix). nix caches the derivation, so repeat calls are cheap.
-func buildRunScript(ctx context.Context) (string, error) {
+func buildRunScript(ctx context.Context, mountDir string) (string, error) {
 	flake := os.Getenv(sandboxFlakeEnv)
 	if flake == "" {
 		dir, err := extractSandboxFlake()
@@ -164,7 +169,11 @@ func buildRunScript(ctx context.Context) (string, error) {
 		flake = dir
 	}
 	ref := flake + "#nixosConfigurations.sandbox.config.system.build.vm"
-	out, err := exec.CommandContext(ctx, "nix", "build", ref, "--impure", "--no-link", "--print-out-paths").Output()
+	// The build is impure, so the flake reads the guest mount point from the
+	// environment; pass it here so the project lands at /root/<name>.
+	cmd := exec.CommandContext(ctx, "nix", "build", ref, "--impure", "--no-link", "--print-out-paths")
+	cmd.Env = append(os.Environ(), projectMountEnv+"="+mountDir)
+	out, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("nix build %s: %w", ref, cmdErr(err))
 	}
@@ -269,6 +278,10 @@ func (m *manager) Target() (Target, error) {
 
 // shareDir is the host directory shared into the guest at /tmp/shared.
 func (m *manager) shareDir() string { return filepath.Join(m.runtimeDir, "share") }
+
+// mountDir is the guest path the project is mounted at: /root/<host dir name>,
+// so the mount mirrors the directory the owner launched sssh in.
+func (m *manager) mountDir() string { return "/root/" + filepath.Base(m.projectDir) }
 
 // SharePath returns the host share directory. It errors until Start has created
 // the runtime dir.

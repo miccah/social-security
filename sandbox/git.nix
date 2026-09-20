@@ -7,7 +7,7 @@
 # generates the Co-authored-by trailers from the live connected set and learns
 # each user's email from their first commit. Push is disabled: no push
 # credentials are placed in the VM, and a pre-push hook rejects every push.
-{ pkgs, ... }:
+{ pkgs, projectDir, ... }:
 
 let
   # Runtime dir on tmpfs holding the staged helper, the owner identity include,
@@ -43,7 +43,7 @@ in {
     [core]
         hooksPath = ${hooks}
     [safe]
-        directory = /root/project
+        directory = ${projectDir}
     [include]
         path = ${identity}
   '';
