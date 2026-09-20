@@ -66,7 +66,7 @@
   };
 
   # Base tools present regardless of the owner environment or project toolchain.
-  environment.systemPackages = with pkgs; [ git curl ];
+  environment.systemPackages = with pkgs; [ git curl ghostty ];
 
   # First release this configuration targets; pins stateful defaults.
   system.stateVersion = "26.05";
