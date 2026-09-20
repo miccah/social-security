@@ -8,6 +8,9 @@ package vm
 import (
 	"bufio"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -213,35 +216,40 @@ func freeLoopbackPort() (int, error) {
 	return l.Addr().(*net.TCPAddr).Port, nil
 }
 
-// generateKey writes an ed25519 keypair into the runtime dir and stages the
-// public half in the 9p share the guest installs as its authorized key.
-func (m *manager) generateKey(ctx context.Context) error {
-	m.keyPath = filepath.Join(m.runtimeDir, "id_ed25519")
-	gen := exec.CommandContext(ctx, "ssh-keygen", "-t", "ed25519", "-N", "", "-C", "sssh-sandbox", "-f", m.keyPath)
-	if out, err := gen.CombinedOutput(); err != nil {
-		return fmt.Errorf("generate ssh key: %v: %s", err, strings.TrimSpace(string(out)))
+// generateKey mints an ed25519 keypair in process, keeps the signer the bridge
+// uses to ssh into the guest, stages the public half in the 9p share the guest
+// installs as its authorized key, and writes the private half into the runtime
+// dir so the logged `ssh -i` connect command works for manual debugging.
+func (m *manager) generateKey(context.Context) error {
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return fmt.Errorf("generate ssh key: %w", err)
+	}
+	sshPub, err := ssh.NewPublicKey(pub)
+	if err != nil {
+		return fmt.Errorf("wrap public key: %w", err)
+	}
+	m.signer, err = ssh.NewSignerFromSigner(priv)
+	if err != nil {
+		return fmt.Errorf("build signer: %w", err)
 	}
 
 	shareDir := filepath.Join(m.runtimeDir, "share")
 	if err := os.MkdirAll(shareDir, 0o755); err != nil {
 		return fmt.Errorf("create key share: %w", err)
 	}
-	pub, err := os.ReadFile(m.keyPath + ".pub")
-	if err != nil {
-		return fmt.Errorf("read public key: %w", err)
-	}
-	if err := os.WriteFile(filepath.Join(shareDir, "authorized_keys"), pub, 0o644); err != nil {
+	authorized := ssh.MarshalAuthorizedKey(sshPub)
+	if err := os.WriteFile(filepath.Join(shareDir, "authorized_keys"), authorized, 0o644); err != nil {
 		return fmt.Errorf("write authorized_keys: %w", err)
 	}
 
-	// Parse the private half into a signer the bridge uses to ssh into the guest.
-	priv, err := os.ReadFile(m.keyPath)
+	block, err := ssh.MarshalPrivateKey(priv, "sssh-sandbox")
 	if err != nil {
-		return fmt.Errorf("read private key: %w", err)
+		return fmt.Errorf("marshal private key: %w", err)
 	}
-	m.signer, err = ssh.ParsePrivateKey(priv)
-	if err != nil {
-		return fmt.Errorf("parse private key: %w", err)
+	m.keyPath = filepath.Join(m.runtimeDir, "id_ed25519")
+	if err := os.WriteFile(m.keyPath, pem.EncodeToMemory(block), 0o600); err != nil {
+		return fmt.Errorf("write private key: %w", err)
 	}
 	return nil
 }
