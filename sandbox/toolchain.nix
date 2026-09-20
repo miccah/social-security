@@ -47,6 +47,11 @@ in {
     after = [ "network.target" ];
     wantedBy = [ "multi-user.target" ];
     environment.HOME = "/root";
+    # The tmux server inherits this PATH, and run-shell executes the plugin
+    # scripts (sensible, pain-control) in the server environment: they start
+    # with `#!/usr/bin/env bash` and call bare `tmux`/`grep`, so without these
+    # each plugin exits 127.
+    path = with pkgs; [ tmux bashInteractive gnugrep coreutils ];
     serviceConfig = {
       Type = "oneshot";
       RemainAfterExit = true;
