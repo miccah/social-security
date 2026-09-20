@@ -137,8 +137,9 @@ func (s *Store) get(ssh string) *entry {
 
 // Render rewrites the Co-authored-by block of msg to credit the users in order,
 // using each one's known identity and a placeholder for an unknown email. It
-// replaces any existing co-author trailers, so it is idempotent across re-runs
-// and tracks users connecting and disconnecting.
+// places the block at the end of the user's message, above the comment and diff
+// block git appends, and replaces any existing co-author trailers, so it is
+// idempotent across re-runs and tracks users connecting and disconnecting.
 func (s *Store) Render(order []string, msg string) string {
 	var lines []string
 	for _, ssh := range order {
@@ -152,11 +153,27 @@ func (s *Store) Render(order []string, msg string) string {
 		}
 		lines = append(lines, fmt.Sprintf("%s: %s <%s>", trailerKey, e.name, email))
 	}
-	body := stripCoauthors(msg)
+	body, tail := splitTemplate(msg)
+	body = stripCoauthors(body)
 	if len(lines) == 0 {
-		return body
+		return body + tail
 	}
-	return "\n\n" + strings.Join(lines, "\n") + body
+	return strings.TrimRight(body, "\n") + "\n\n" + strings.Join(lines, "\n") + "\n" + tail
+}
+
+// splitTemplate separates the user's message from the trailing block git appends:
+// the comment lines, and with `commit -v` the scissors line and the diff below
+// it. The boundary is the first comment line; everything from there down is git's,
+// so co-author trailers belong just above it and the diff below is left untouched.
+// It assumes the default comment character.
+func splitTemplate(msg string) (body, tail string) {
+	lines := strings.SplitAfter(msg, "\n")
+	for i, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+			return strings.Join(lines[:i], ""), strings.Join(lines[i:], "")
+		}
+	}
+	return msg, ""
 }
 
 // Learn updates the store from a finished commit message, mapping each
@@ -164,7 +181,8 @@ func (s *Store) Render(order []string, msg string) string {
 // recorded; an email is recorded only when it is a plausible address, so an
 // untouched placeholder leaves the user unknown.
 func (s *Store) Learn(order []string, msg string) {
-	lines := parseCoauthors(msg)
+	body, _ := splitTemplate(msg)
+	lines := parseCoauthors(body)
 	for i, ssh := range order {
 		if i >= len(lines) {
 			break

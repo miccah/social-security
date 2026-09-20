@@ -52,6 +52,33 @@ func TestRenderIdempotentAndTracksDrop(t *testing.T) {
 	}
 }
 
+// Render places the block at the end of the body, above git's comment and diff
+// tail (as with `git commit -v`), and ignores a Co-authored-by line inside the
+// diff.
+func TestRenderPlacesBlockBeforeTail(t *testing.T) {
+	s := &Store{entries: []entry{{ssh: "alice", name: "alice"}}}
+	msg := "subject\n\nbody\n\n# Please enter the commit message\n# ---- >8 ----\ndiff --git a/f b/f\n+Co-authored-by: ghost <ghost@x.io>\n"
+	got := s.Render([]string{"alice"}, msg)
+	want := "subject\n\nbody\n\nCo-authored-by: alice <add your email>\n# Please enter the commit message\n# ---- >8 ----\ndiff --git a/f b/f\n+Co-authored-by: ghost <ghost@x.io>\n"
+	if got != want {
+		t.Fatalf("Render =\n%q\nwant\n%q", got, want)
+	}
+}
+
+// On amend, Render replaces the existing trailers in place without duplicating
+// them or disturbing the subject, even with a comment and diff tail present.
+func TestRenderAmendReplacesInPlace(t *testing.T) {
+	s := &Store{entries: []entry{{ssh: "alice", name: "Alice", email: "alice@x.io"}}}
+	msg := "subject\n\nCo-authored-by: Alice <alice@x.io>\n# comment\ndiff --git\n"
+	got := s.Render([]string{"alice"}, msg)
+	if want := "subject\n\nCo-authored-by: Alice <alice@x.io>\n# comment\ndiff --git\n"; got != want {
+		t.Fatalf("amend Render =\n%q\nwant\n%q", got, want)
+	}
+	if n := strings.Count(got, "Co-authored-by"); n != 1 {
+		t.Fatalf("expected exactly one trailer, got %d:\n%s", n, got)
+	}
+}
+
 // Learn maps each co-author line to a user by position, recording a filled-in
 // email and leaving an untouched placeholder unknown.
 func TestLearnByPosition(t *testing.T) {
