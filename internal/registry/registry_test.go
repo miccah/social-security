@@ -58,6 +58,7 @@ func TestClaimOwnerExactlyOnceUnderRace(t *testing.T) {
 // the active session frees the username for reuse.
 func TestPendingAcceptActivate(t *testing.T) {
 	r := New()
+	r.ClaimOwner()
 	if r.Count() != 0 {
 		t.Fatalf("Count = %d, want 0", r.Count())
 	}
@@ -96,6 +97,36 @@ func TestPendingAcceptActivate(t *testing.T) {
 	// The username is free again.
 	if _, err := r.AddPending("alice", "x", "y"); err != nil {
 		t.Fatalf("username should be free after the session ends: %v", err)
+	}
+}
+
+// Accepting while the owner is absent is refused and leaves the request pending;
+// once the owner joins, the same request accepts.
+func TestAcceptRequiresOwner(t *testing.T) {
+	r := New()
+	req, err := r.AddPending("dave", "1", "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := r.Resolve(req.ID, Accept); !errors.Is(err, ErrOwnerAbsent) {
+		t.Fatalf("err = %v, want ErrOwnerAbsent", err)
+	}
+	if len(r.Pending()) != 1 {
+		t.Fatal("a refused accept must leave the request pending")
+	}
+	select {
+	case <-req.Decision():
+		t.Fatal("no decision should be delivered while the owner is absent")
+	default:
+	}
+
+	r.ClaimOwner()
+	if err := r.Resolve(req.ID, Accept); err != nil {
+		t.Fatalf("accept after owner joins: %v", err)
+	}
+	if d := <-req.Decision(); d != Accept {
+		t.Fatalf("decision = %v, want Accept", d)
 	}
 }
 
@@ -152,6 +183,7 @@ func TestCancelPendingAndUnknownResolve(t *testing.T) {
 // Kick invokes the session's on-kick callback; an unknown session errors.
 func TestKickInvokesCallback(t *testing.T) {
 	r := New()
+	r.ClaimOwner()
 	req, _ := r.AddPending("erin", "1", "a")
 	if err := r.Resolve(req.ID, Accept); err != nil {
 		t.Fatal(err)
@@ -201,6 +233,7 @@ func TestPendingOrder(t *testing.T) {
 // Concurrent access is safe (run under -race).
 func TestConcurrentAccess(t *testing.T) {
 	r := New()
+	r.ClaimOwner() // so accepts are admitted and the accept path is exercised
 	var wg sync.WaitGroup
 	for i := 0; i < 64; i++ {
 		wg.Add(1)

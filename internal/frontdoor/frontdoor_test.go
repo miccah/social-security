@@ -70,12 +70,38 @@ func startFrontDoorQuit(t *testing.T, reg registry.Registry, vmm vmTarget, quit 
 	addr := freeAddr(t)
 	t.Setenv(addrEnv, addr)
 	t.Setenv(hostKeyEnv, filepath.Join(t.TempDir(), "host_ed25519"))
-	fd := New(reg, vmm, quit)
+	fd := New(reg, vmm, nil, quit)
 	if err := fd.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	t.Cleanup(func() { fd.Stop(context.Background()) })
 	return addr
+}
+
+// fakeIngress exposes a plain listener as the public tunnel ingress.
+type fakeIngress struct{ ln net.Listener }
+
+func (f fakeIngress) Listener() net.Listener { return f.ln }
+
+// startFrontDoorGuest starts a front door with a public guest listener alongside
+// the LAN one and returns the guest listener's address.
+func startFrontDoorGuest(t *testing.T, reg registry.Registry, vmm vmTarget) string {
+	t.Helper()
+	t.Setenv(addrEnv, freeAddr(t))
+	t.Setenv(hostKeyEnv, filepath.Join(t.TempDir(), "host_ed25519"))
+	gl, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fd := New(reg, vmm, fakeIngress{gl}, func() {})
+	if err := fd.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() {
+		fd.Stop(context.Background())
+		gl.Close()
+	})
+	return gl.Addr().String()
 }
 
 func dialGuest(t *testing.T, addr string) *gossh.Client { return dialGuestAs(t, addr, "guest") }
@@ -536,6 +562,24 @@ func TestFirstConnectionIsOwner(t *testing.T) {
 	awaitPending(t, reg, "bob")
 }
 
+// A connection arriving on the public tunnel is always a guest and runs the join
+// ceremony, even as the first connection with the owner slot free.
+func TestTunnelConnectionIsAlwaysGuest(t *testing.T) {
+	reg := registry.New()
+	guestAddr := startFrontDoorGuest(t, reg, fakeVMTarget{})
+
+	guest := dialGuest(t, guestAddr)
+	defer guest.Close()
+	_, stdin, _ := openShell(t, guest)
+	writeLine(t, stdin, "bob")
+	writeLine(t, stdin, "ssn")
+	awaitPending(t, reg, "bob")
+
+	if reg.OwnerPresent() {
+		t.Fatal("a tunnel connection must not claim the owner slot")
+	}
+}
+
 // The owner slot is freed on disconnect, so a later connection can take over.
 func TestOwnerSlotReleasedOnDisconnect(t *testing.T) {
 	sessionSigner := genSigner(t)
@@ -614,7 +658,7 @@ func TestGuestDisconnectKeepsSession(t *testing.T) {
 func TestStartBindError(t *testing.T) {
 	t.Setenv(addrEnv, "127.0.0.1:99999") // out-of-range port
 	t.Setenv(hostKeyEnv, filepath.Join(t.TempDir(), "host_ed25519"))
-	fd := New(registry.New(), fakeVMTarget{}, func() {})
+	fd := New(registry.New(), fakeVMTarget{}, nil, func() {})
 	if err := fd.Start(context.Background()); err == nil {
 		fd.Stop(context.Background())
 		t.Fatal("Start should error on an unbindable address")
@@ -655,7 +699,7 @@ func frontDoorHostKey(t *testing.T, keyPath string) string {
 	addr := freeAddr(t)
 	t.Setenv(addrEnv, addr)
 	t.Setenv(hostKeyEnv, keyPath)
-	fd := New(registry.New(), fakeVMTarget{}, func() {})
+	fd := New(registry.New(), fakeVMTarget{}, nil, func() {})
 	if err := fd.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}

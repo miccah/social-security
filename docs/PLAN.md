@@ -69,11 +69,11 @@ composed (base + owner environment + project toolchain), not a fixed image (DESI
 
 **Goal:** guests can reach the front door from the internet.
 
-- [ ] Startup opens an ngrok TCP endpoint and prints guest + owner connect strings.
-- [ ] ngrok failure aborts startup with a clear error and exposes nothing.
-- [ ] A guest using the printed string over the internet reaches the front door and
+- [x] Startup opens an ngrok TCP endpoint and prints guest + owner connect strings.
+- [x] ngrok failure aborts startup with a clear error and exposes nothing.
+- [x] A guest using the printed string over the internet reaches the front door and
       is bridged into the shared tmux (auto-accept placeholder).
-- [ ] Teardown closes the tunnel; the public address stops accepting connections.
+- [x] Teardown closes the tunnel; the public address stops accepting connections.
 
 ## M4 — Join ceremony + registry
 

@@ -58,20 +58,29 @@ type vmTarget interface {
 	Target() (vm.Target, error)
 }
 
+// guestIngress supplies the public listener guests reach the front door through,
+// separate from the LAN listener the owner uses. An interface so the front door
+// depends on behavior, not the concrete tunnel manager.
+type guestIngress interface {
+	Listener() net.Listener
+}
+
 type manager struct {
 	reg        registry.Registry
 	vm         vmTarget
+	guest      guestIngress
 	endSession func() // called when the owner disconnects, to end the whole session
 
 	srv *ssh.Server
 	ln  net.Listener
 }
 
-// New returns a front door that bridges LAN sessions into the VM's shared tmux,
-// tracking each connection in the registry. endSession is called when the owner
-// disconnects, to tear down the session for everyone.
-func New(reg registry.Registry, vmm vmTarget, endSession func()) Manager {
-	return &manager{reg: reg, vm: vmm, endSession: endSession}
+// New returns a front door that bridges sessions into the VM's shared tmux,
+// tracking each connection in the registry. It serves the owner over LAN and, if
+// guest is non-nil, guests over its public listener. endSession is called when
+// the owner disconnects, to tear down the session for everyone.
+func New(reg registry.Registry, vmm vmTarget, guest guestIngress, endSession func()) Manager {
+	return &manager{reg: reg, vm: vmm, guest: guest, endSession: endSession}
 }
 
 func (m *manager) Name() string { return "frontdoor" }
@@ -105,6 +114,9 @@ func (m *manager) Start(context.Context) error {
 		// every connection straight into the shared session.
 		wish.WithPublicKeyAuth(func(ssh.Context, ssh.PublicKey) bool { return true }),
 		wish.WithKeyboardInteractiveAuth(func(ssh.Context, gossh.KeyboardInteractiveChallenge) bool { return true }),
+		// Tag connections arriving on the public tunnel so the handler never lets
+		// them claim the owner slot.
+		ssh.WrapConn(tagGuestConn),
 		wish.WithMiddleware(m.joinMiddleware),
 	)
 	if err != nil {
@@ -118,13 +130,62 @@ func (m *manager) Start(context.Context) error {
 		return fmt.Errorf("listen on %s: %w", addr, err)
 	}
 	slog.Info("frontdoor: listening", "addr", m.ln.Addr().String())
+	go m.serve(m.ln)
 
-	go func() {
-		if err := m.srv.Serve(m.ln); err != nil && !errors.Is(err, ssh.ErrServerClosed) {
-			slog.Error("frontdoor: serve failed", "err", err)
+	// Serve guests over the public listener too, so the same join ceremony and
+	// bridge handle internet connections. The tunnel opened it before the front
+	// door started, so it is ready here. It is wrapped so the server's shutdown
+	// does not close it: the tunnel manager owns that listener and closes it
+	// itself, which also avoids a double close on teardown.
+	if m.guest != nil {
+		if gl := m.guest.Listener(); gl != nil {
+			slog.Info("frontdoor: serving guests", "addr", gl.Addr().String())
+			go m.serve(guestListener{gl})
 		}
-	}()
+	}
 	return nil
+}
+
+// guestListener wraps the public tunnel listener. Its Close is a no-op so the
+// ssh server's shutdown leaves the underlying listener open for its owner (the
+// tunnel manager) to close; the accept loop still exits once that owner closes
+// it. Every accepted connection is tagged so the handler treats it as a guest
+// and never the owner.
+type guestListener struct{ net.Listener }
+
+func (guestListener) Close() error { return nil }
+
+func (l guestListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	return guestConn{conn}, nil
+}
+
+// guestConn marks a connection accepted from the public tunnel listener.
+type guestConn struct{ net.Conn }
+
+// guestConnKey marks, in the ssh context, a connection that arrived on the public
+// tunnel listener. Such a connection is always a guest.
+type guestConnKey struct{}
+
+// tagGuestConn records public-tunnel origin on the connection's context so the
+// handler can refuse it the owner slot. Connections from the LAN listener are
+// left untagged.
+func tagGuestConn(ctx ssh.Context, conn net.Conn) net.Conn {
+	if _, ok := conn.(guestConn); ok {
+		ctx.SetValue(guestConnKey{}, true)
+	}
+	return conn
+}
+
+// serve runs the ssh server on one listener until it is closed. Called once per
+// listener (LAN and, when present, the public tunnel).
+func (m *manager) serve(ln net.Listener) {
+	if err := m.srv.Serve(ln); err != nil && !errors.Is(err, ssh.ErrServerClosed) {
+		slog.Error("frontdoor: serve failed", "addr", ln.Addr().String(), "err", err)
+	}
 }
 
 func (m *manager) Stop(context.Context) error {
@@ -160,10 +221,11 @@ func hostKeyPath() (string, error) {
 	return path, nil
 }
 
-// joinMiddleware handles each connection: the first claims the owner slot and is
-// bridged straight into the shared tmux; every later connection is a guest that
-// runs the join ceremony. It ignores next because the front door is the terminal
-// handler, not a link in a chain.
+// joinMiddleware handles each connection: the first LAN connection claims the
+// owner slot and is bridged straight into the shared tmux; every other
+// connection is a guest that runs the join ceremony. Connections from the public
+// tunnel are always guests, so ngrok can never reach the owner slot. It ignores
+// next because the front door is the terminal handler, not a link in a chain.
 func (m *manager) joinMiddleware(ssh.Handler) ssh.Handler {
 	return func(s ssh.Session) {
 		if _, _, ok := s.Pty(); !ok {
@@ -171,7 +233,8 @@ func (m *manager) joinMiddleware(ssh.Handler) ssh.Handler {
 			s.Exit(1)
 			return
 		}
-		if m.reg.ClaimOwner() {
+		fromTunnel, _ := s.Context().Value(guestConnKey{}).(bool)
+		if !fromTunnel && m.reg.ClaimOwner() {
 			m.serveOwner(s)
 			return
 		}

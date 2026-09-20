@@ -27,6 +27,11 @@ const (
 // by a pending request or an active session.
 var ErrUsernameTaken = errors.New("registry: username already in use")
 
+// ErrOwnerAbsent is returned by Resolve when accepting a request while the owner
+// is not in the session. Guests are only ever admitted to a session the owner is
+// already in.
+var ErrOwnerAbsent = errors.New("registry: owner is not in the session")
+
 // Request is a join request awaiting the owner's decision.
 type Request struct {
 	ID         string
@@ -60,7 +65,9 @@ type Registry interface {
 	AddPending(username, ssn, remoteAddr string) (*Request, error)
 	// Resolve delivers the owner's decision to the blocked handler and removes the
 	// request from pending. A declined request frees its username; an accepted one
-	// keeps it claimed for the coming Activate. An unknown ID returns an error.
+	// keeps it claimed for the coming Activate. Accepting while the owner is absent
+	// returns ErrOwnerAbsent and leaves the request pending. An unknown ID returns
+	// an error.
 	Resolve(id string, d Decision) error
 	// CancelPending drops a still-pending request and frees its username. It is a
 	// no-op once the request is gone (already resolved or cancelled).
@@ -154,6 +161,13 @@ func (r *registry) Resolve(id string, d Decision) error {
 	if !ok {
 		r.mu.Unlock()
 		return fmt.Errorf("registry: no pending request %q", id)
+	}
+	// A guest may only be admitted to a session the owner is already in. Accepting
+	// while the owner is absent leaves the request pending, so it can be accepted
+	// once the owner joins.
+	if d == Accept && !r.owner {
+		r.mu.Unlock()
+		return ErrOwnerAbsent
 	}
 	delete(r.pending, id)
 	if d == Decline {

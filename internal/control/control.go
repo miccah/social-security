@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/url"
 	"os"
 	"strings"
 
@@ -24,15 +25,21 @@ type Plane interface {
 	lifecycle.Manager
 }
 
-// addrProvider supplies the front door's connect address.
+// addrProvider supplies the front door's LAN connect address (the owner).
 type addrProvider interface {
 	Addr() string
 }
 
+// urlProvider supplies the tunnel's public endpoint URL (guests).
+type urlProvider interface {
+	URL() *url.URL
+}
+
 type plane struct {
-	reg   registry.Registry
-	front addrProvider
-	quit  func() // ends the session when the owner leaves the control plane
+	reg    registry.Registry
+	front  addrProvider
+	tunnel urlProvider
+	quit   func() // ends the session when the owner leaves the control plane
 
 	prog       *tea.Program
 	done       chan struct{}
@@ -40,10 +47,11 @@ type plane struct {
 	prevLogger *slog.Logger
 }
 
-// New returns a control plane bound to the registry, reading connect details
-// from front and calling quit when the owner exits the UI.
-func New(reg registry.Registry, front addrProvider, quit func()) Plane {
-	return &plane{reg: reg, front: front, quit: quit}
+// New returns a control plane bound to the registry, reading the owner connect
+// address from front and the guest connect URL from tunnel, and calling quit
+// when the owner exits the UI.
+func New(reg registry.Registry, front addrProvider, tunnel urlProvider, quit func()) Plane {
+	return &plane{reg: reg, front: front, tunnel: tunnel, quit: quit}
 }
 
 func (p *plane) Name() string { return "control" }
@@ -61,7 +69,7 @@ func (p *plane) Start(context.Context) error {
 	p.prevLogger = slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(f, nil)))
 
-	p.prog = tea.NewProgram(newModel(p.reg, connectLine(p.front.Addr())), tea.WithAltScreen())
+	p.prog = tea.NewProgram(newModel(p.reg, guestConnectLine(p.tunnel.URL()), connectLine(p.front.Addr())), tea.WithAltScreen())
 	p.done = make(chan struct{})
 	go func() {
 		defer close(p.done)
@@ -89,8 +97,8 @@ func (p *plane) Stop(context.Context) error {
 	return nil
 }
 
-// connectLine renders the ssh command the owner shares, given the front door's
-// listen address.
+// connectLine renders the ssh command the owner runs over LAN, given the front
+// door's listen address.
 func connectLine(addr string) string {
 	_, port, err := net.SplitHostPort(addr)
 	if err != nil {
@@ -101,6 +109,18 @@ func connectLine(addr string) string {
 		host = "localhost"
 	}
 	return fmt.Sprintf("ssh -p %s %s", port, host)
+}
+
+// guestConnectLine renders the ssh command a guest runs against the public ngrok
+// endpoint. The front door accepts any user, so none is included.
+func guestConnectLine(u *url.URL) string {
+	if u == nil {
+		return "(unavailable)"
+	}
+	if port := u.Port(); port != "" {
+		return fmt.Sprintf("ssh -p %s %s", port, u.Hostname())
+	}
+	return fmt.Sprintf("ssh %s", u.Hostname())
 }
 
 // row is one selectable entry: a pending request (accept/decline) or an active
@@ -114,8 +134,9 @@ type row struct {
 type refreshMsg struct{}
 
 type model struct {
-	reg     registry.Registry
-	connect string
+	reg          registry.Registry
+	guestConnect string
+	ownerConnect string
 
 	rows         []row
 	cursor       int
@@ -125,8 +146,8 @@ type model struct {
 	confirmingQuit bool
 }
 
-func newModel(reg registry.Registry, connect string) model {
-	m := model{reg: reg, connect: connect}
+func newModel(reg registry.Registry, guestConnect, ownerConnect string) model {
+	m := model{reg: reg, guestConnect: guestConnect, ownerConnect: ownerConnect}
 	m.refresh()
 	return m
 }
@@ -187,7 +208,13 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.cursor++
 		}
 	case "a":
-		m.resolveSelected(registry.Accept)
+		// Guests may only be approved once the owner is in the session, so the
+		// owner is present the moment anyone is admitted. Read the registry
+		// directly so the gate is authoritative, not a stale snapshot. Declining
+		// is always allowed.
+		if m.reg.OwnerPresent() {
+			m.resolveSelected(registry.Accept)
+		}
 	case "d":
 		m.resolveSelected(registry.Decline)
 	case "x":
@@ -263,13 +290,14 @@ func (m *model) refresh() (grewWaiting bool) {
 func (m model) View() string {
 	var b strings.Builder
 	b.WriteString("sssh control\n\n")
-	b.WriteString("connect:  " + m.connect + "\n")
+	b.WriteString("guest connect:  " + m.guestConnect + "\n")
+	b.WriteString("owner connect:  " + m.ownerConnect + "\n")
 
 	ownerStatus := "awaiting connection"
 	if m.ownerPresent {
 		ownerStatus = "joined"
 	}
-	fmt.Fprintf(&b, "owner:    %s\n\n", ownerStatus)
+	fmt.Fprintf(&b, "owner:          %s\n\n", ownerStatus)
 
 	waiting := 0
 	for _, r := range m.rows {
@@ -297,6 +325,9 @@ func (m model) View() string {
 	if m.confirmingQuit {
 		b.WriteString("\nquit and end the session for everyone? [y/N]\n")
 	} else {
+		if !m.ownerPresent {
+			b.WriteString("\njoin the session (owner connect) to approve guests\n")
+		}
 		b.WriteString("\nj/k move  [a]ccept  [d]ecline  [x]kick  [q]uit\n")
 	}
 	return b.String()

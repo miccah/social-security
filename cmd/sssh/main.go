@@ -71,10 +71,19 @@ func run() error {
 	// VM handle to reach the guest sshd once the VM has booted.
 	vmm := vm.New(project)
 
-	// The control plane reads the front door's connect address and drives the
-	// registry, so it takes both, plus cancel to end the session on quit. The
-	// front door ends the session the same way when the owner disconnects.
-	fd := frontdoor.New(reg, vmm, cancel)
+	// Public ingress: the tunnel opens the ngrok endpoint the front door serves
+	// guests on, and the control plane reads its URL for the guest connect
+	// string. Started before the front door so its listener is ready.
+	tun := tunnel.New()
+
+	// The front door serves the owner over LAN and guests over the tunnel's
+	// public listener, and ends the session when the owner disconnects.
+	fd := frontdoor.New(reg, vmm, tun, cancel)
+
+	// The control plane reads the guest connect URL from the tunnel and the owner
+	// connect address from the front door, drives the registry, and calls cancel
+	// to end the session on quit.
+	ctrl := control.New(reg, fd, tun, cancel)
 
 	// Managers start in dependency order: state, then the sandbox, the commit
 	// helper's writer (which needs the sandbox's share path), then public
@@ -84,9 +93,9 @@ func run() error {
 		reg,
 		vmm,
 		coauthor.NewWriter(reg, vmm),
-		tunnel.New(),
+		tun,
 		fd,
-		control.New(reg, fd, cancel),
+		ctrl,
 	}
 
 	// Start managers one at a time. If any fails, tear down the ones already

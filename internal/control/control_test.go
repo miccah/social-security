@@ -16,6 +16,7 @@ func key(r rune) tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyRunes, Runes: []run
 func regWithActive(t *testing.T) registry.Registry {
 	t.Helper()
 	reg := registry.New()
+	reg.ClaimOwner()
 	req, err := reg.AddPending("alice", "1", "a")
 	if err != nil {
 		t.Fatal(err)
@@ -28,15 +29,16 @@ func regWithActive(t *testing.T) registry.Registry {
 	return reg
 }
 
-// Pressing 'a' accepts the selected pending request.
+// Pressing 'a' accepts the selected pending request once the owner has joined.
 func TestAcceptResolvesSelectedPending(t *testing.T) {
 	reg := registry.New()
+	reg.ClaimOwner()
 	req, err := reg.AddPending("alice", "111", "10.0.0.1:2200")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	m := newModel(reg, "ssh -p 1337 host")
+	m := newModel(reg, "ssh -p 1 tcp.ngrok.io", "ssh -p 1337 host")
 	m.Update(key('a'))
 
 	if len(reg.Pending()) != 0 {
@@ -52,6 +54,56 @@ func TestAcceptResolvesSelectedPending(t *testing.T) {
 	}
 }
 
+// Accept is inert until the owner is in the session; the request stays pending.
+func TestAcceptBlockedUntilOwnerPresent(t *testing.T) {
+	reg := registry.New()
+	req, err := reg.AddPending("alice", "111", "10.0.0.1:2200")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	m := newModel(reg, "g", "x")
+	m.Update(key('a'))
+
+	if len(reg.Pending()) != 1 {
+		t.Fatal("accept should be blocked while the owner is absent")
+	}
+	select {
+	case <-req.Decision():
+		t.Fatal("no decision should be delivered while the owner is absent")
+	default:
+	}
+
+	// Once the owner joins, the same keystroke accepts.
+	reg.ClaimOwner()
+	m.Update(key('a'))
+	if len(reg.Pending()) != 0 {
+		t.Fatal("accept should resolve the request once the owner is present")
+	}
+	if d := <-req.Decision(); d != registry.Accept {
+		t.Fatalf("decision = %v, want Accept", d)
+	}
+}
+
+// Declining is allowed even before the owner joins, and frees the username.
+func TestDeclineAllowedWithoutOwner(t *testing.T) {
+	reg := registry.New()
+	req, err := reg.AddPending("bob", "1", "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	m := newModel(reg, "g", "x")
+	m.Update(key('d'))
+
+	if d := <-req.Decision(); d != registry.Decline {
+		t.Fatalf("decision = %v, want Decline", d)
+	}
+	if _, err := reg.AddPending("bob", "1", "a"); err != nil {
+		t.Fatalf("username should be free after decline: %v", err)
+	}
+}
+
 // Pressing 'd' declines the selected pending request and frees the username.
 func TestDeclineResolvesSelectedPending(t *testing.T) {
 	reg := registry.New()
@@ -60,7 +112,7 @@ func TestDeclineResolvesSelectedPending(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	m := newModel(reg, "x")
+	m := newModel(reg, "g", "x")
 	m.Update(key('d'))
 
 	select {
@@ -79,13 +131,14 @@ func TestDeclineResolvesSelectedPending(t *testing.T) {
 // Pressing 'k' kicks the selected active session.
 func TestKickInvokesOnKick(t *testing.T) {
 	reg := registry.New()
+	reg.ClaimOwner()
 	req, _ := reg.AddPending("carol", "1", "a")
 	reg.Resolve(req.ID, registry.Accept)
 	<-req.Decision()
 	kicked := make(chan struct{}, 1)
 	reg.Activate(req, func() { kicked <- struct{}{} })
 
-	m := newModel(reg, "x")
+	m := newModel(reg, "g", "x")
 	m.Update(key('x'))
 
 	select {
@@ -98,11 +151,12 @@ func TestKickInvokesOnKick(t *testing.T) {
 // The cursor selects among rows so an action targets the intended entry.
 func TestNavigateAndAcceptSecond(t *testing.T) {
 	reg := registry.New()
+	reg.ClaimOwner()
 	first, _ := reg.AddPending("a", "1", "x")
 	time.Sleep(time.Millisecond)
 	second, _ := reg.AddPending("b", "2", "y")
 
-	m := newModel(reg, "x")
+	m := newModel(reg, "g", "x")
 	next, _ := m.Update(key('j')) // vi-style down
 	m = next.(model)
 	m.Update(key('a'))
@@ -124,7 +178,7 @@ func TestNavigateAndAcceptSecond(t *testing.T) {
 // A newly arrived request rings the bell once.
 func TestBellOnNewPending(t *testing.T) {
 	reg := registry.New()
-	m := newModel(reg, "x")
+	m := newModel(reg, "g", "x")
 
 	reg.AddPending("dave", "1", "a")
 	if !m.refresh() {
@@ -137,7 +191,7 @@ func TestBellOnNewPending(t *testing.T) {
 
 // With users present, quitting asks for confirmation first, then y ends it.
 func TestQuitConfirmsWhenUsersPresent(t *testing.T) {
-	m := newModel(regWithActive(t), "x")
+	m := newModel(regWithActive(t), "g", "x")
 
 	next, cmd := m.Update(key('q'))
 	if cmd != nil {
@@ -159,7 +213,7 @@ func TestQuitConfirmsWhenUsersPresent(t *testing.T) {
 
 // Declining the confirmation returns to the control plane without quitting.
 func TestQuitCanceled(t *testing.T) {
-	m := newModel(regWithActive(t), "x")
+	m := newModel(regWithActive(t), "g", "x")
 
 	next, _ := m.Update(key('q'))
 	m = next.(model)
@@ -179,7 +233,7 @@ func TestQuitCanceled(t *testing.T) {
 // The view reflects whether the owner has joined.
 func TestOwnerStatusDisplayed(t *testing.T) {
 	reg := registry.New()
-	m := newModel(reg, "x")
+	m := newModel(reg, "g", "x")
 	if !strings.Contains(m.View(), "awaiting") {
 		t.Fatalf("view should show the owner is awaited before joining:\n%s", m.View())
 	}
@@ -193,7 +247,7 @@ func TestOwnerStatusDisplayed(t *testing.T) {
 
 // With no one connected, quitting is immediate (nothing to confirm).
 func TestQuitImmediateWhenEmpty(t *testing.T) {
-	m := newModel(registry.New(), "x")
+	m := newModel(registry.New(), "g", "x")
 	_, cmd := m.Update(key('q'))
 	if cmd == nil {
 		t.Fatal("q should quit immediately when no one is connected")
