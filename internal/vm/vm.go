@@ -234,7 +234,7 @@ func (m *manager) generateKey(context.Context) error {
 		return fmt.Errorf("build signer: %w", err)
 	}
 
-	shareDir := filepath.Join(m.runtimeDir, "share")
+	shareDir := m.shareDir()
 	if err := os.MkdirAll(shareDir, 0o755); err != nil {
 		return fmt.Errorf("create key share: %w", err)
 	}
@@ -333,7 +333,6 @@ func (m *manager) stageHelper() error {
 // boot context.
 func (m *manager) launch(runScript string) error {
 	disk := filepath.Join(m.runtimeDir, "sandbox.qcow2")
-	shareDir := filepath.Join(m.runtimeDir, "share")
 
 	console, err := os.Create(filepath.Join(m.runtimeDir, "console.log"))
 	if err != nil {
@@ -346,7 +345,7 @@ func (m *manager) launch(runScript string) error {
 	cmd.Env = append(os.Environ(),
 		"NIX_DISK_IMAGE="+disk,
 		fmt.Sprintf("QEMU_NET_OPTS=hostfwd=tcp:127.0.0.1:%d-:22", m.port),
-		"SHARED_DIR="+shareDir,
+		"SHARED_DIR="+m.shareDir(),
 		fmt.Sprintf("QEMU_OPTS=-virtfs local,path=%s,mount_tag=project,security_model=none", m.projectDir),
 	)
 	cmd.Stdout = console
