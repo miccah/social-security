@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net"
 	"os"
@@ -22,17 +23,12 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
+	sssh "github.com/miccah/social-security"
 	"github.com/miccah/social-security/internal/lifecycle"
 )
 
 // sandboxFlakeEnv overrides the flake reference the sandbox is built from.
 const sandboxFlakeEnv = "SSSH_SANDBOX_FLAKE"
-
-// defaultSandboxFlake is the flake reference used when sandboxFlakeEnv is unset.
-// It points at sssh's own flake. The base sandbox comes from here; the owner
-// environment is borrowed from the host and the project toolchain is entered at
-// session start, so the flake reference stays independent of the project.
-const defaultSandboxFlake = "/home/ss/ss"
 
 // vmUser is the guest account clients log in as. The sandbox grants full access
 // inside, so a single shared login is enough.
@@ -146,14 +142,23 @@ func (m *manager) Stop(context.Context) error {
 	return nil
 }
 
-// buildRunScript realizes the sandbox from sssh's own flake and returns the path
-// to its QEMU run script. The build is impure: the owner-environment layer reads
-// the host's <nixpkgs> and /etc/nixos to borrow the owner's editor, shell, and
-// tmux (see flake.nix). nix caches the derivation, so repeat calls are cheap.
+// buildRunScript realizes the sandbox from sssh's embedded flake and returns the
+// path to its QEMU run script. The flake is carried in the binary and extracted
+// to a temp directory per build; SSSH_SANDBOX_FLAKE overrides it with a path on
+// disk. The build is impure: the owner-environment layer reads the host's
+// <nixpkgs> and /etc/nixos to borrow the owner's editor, shell, and tmux (see
+// flake.nix). nix caches the derivation, so repeat calls are cheap.
 func buildRunScript(ctx context.Context) (string, error) {
 	flake := os.Getenv(sandboxFlakeEnv)
 	if flake == "" {
-		flake = defaultSandboxFlake
+		dir, err := extractSandboxFlake()
+		if err != nil {
+			return "", err
+		}
+		// nix build copies the flake into the store, so the temp copy is no
+		// longer needed once the build returns.
+		defer os.RemoveAll(dir)
+		flake = dir
 	}
 	ref := flake + "#nixosConfigurations.sandbox.config.system.build.vm"
 	out, err := exec.CommandContext(ctx, "nix", "build", ref, "--impure", "--no-link", "--print-out-paths").Output()
@@ -165,6 +170,35 @@ func buildRunScript(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("nix build %s produced no output path", ref)
 	}
 	return filepath.Join(outPath, "bin", "run-sandbox-vm"), nil
+}
+
+// extractSandboxFlake writes the embedded flake into a fresh temp directory and
+// returns its path. The directory is a plain (non-git) tree, so nix sees every
+// file; the caller removes it once the build has copied it into the store.
+func extractSandboxFlake() (string, error) {
+	dir, err := os.MkdirTemp("", "sssh-flake-")
+	if err != nil {
+		return "", fmt.Errorf("create flake dir: %w", err)
+	}
+	err = fs.WalkDir(sssh.SandboxFlake, ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		dst := filepath.Join(dir, path)
+		if d.IsDir() {
+			return os.MkdirAll(dst, 0o755)
+		}
+		data, err := sssh.SandboxFlake.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(dst, data, 0o644)
+	})
+	if err != nil {
+		os.RemoveAll(dir)
+		return "", fmt.Errorf("write flake: %w", err)
+	}
+	return dir, nil
 }
 
 // freeLoopbackPort reserves an ephemeral loopback port by opening and closing a
