@@ -45,6 +45,10 @@ const vmUser = "root"
 // bootTimeout bounds how long Start waits for the guest sshd to answer.
 const bootTimeout = 2 * time.Minute
 
+// killTimeout bounds how long teardown waits for QEMU to exit on SIGTERM before
+// escalating to SIGKILL.
+const killTimeout = 10 * time.Second
+
 // Target is how to reach the sandbox VM's sshd over the host loopback forward.
 type Target struct {
 	Addr   string     // host:port on loopback that forwards to the guest sshd
@@ -111,7 +115,7 @@ func (m *manager) Start(ctx context.Context) error {
 		}
 	}()
 
-	if err := m.generateKey(ctx); err != nil {
+	if err := m.generateKey(); err != nil {
 		return err
 	}
 
@@ -229,7 +233,7 @@ func freeLoopbackPort() (int, error) {
 // uses to ssh into the guest, stages the public half in the 9p share the guest
 // installs as its authorized key, and writes the private half into the runtime
 // dir so the logged `ssh -i` connect command works for manual debugging.
-func (m *manager) generateKey(context.Context) error {
+func (m *manager) generateKey() error {
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		return fmt.Errorf("generate ssh key: %w", err)
@@ -424,7 +428,7 @@ func (m *manager) teardown() {
 		syscall.Kill(-pgid, syscall.SIGTERM)
 		select {
 		case <-m.exited:
-		case <-time.After(10 * time.Second):
+		case <-time.After(killTimeout):
 			syscall.Kill(-pgid, syscall.SIGKILL)
 		}
 		m.proc = nil

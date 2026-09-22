@@ -224,7 +224,7 @@ func parseCoauthors(msg string) []parsed {
 }
 
 // stripCoauthors removes the real Co-authored-by lines from msg, leaving comments
-// and body intact so Message can rewrite the block from scratch.
+// and body intact so Render can rewrite the block from scratch.
 func stripCoauthors(msg string) string {
 	var kept []string
 	sc := bufio.NewScanner(strings.NewReader(msg))

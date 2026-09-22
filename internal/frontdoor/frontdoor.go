@@ -253,17 +253,28 @@ func (m *manager) serveOwner(s ssh.Session) {
 	slog.Info("frontdoor: owner connected", "remote", remote)
 	defer slog.Info("frontdoor: owner disconnected", "remote", remote)
 
-	target, err := m.vm.Target()
-	if err != nil {
-		slog.Error("frontdoor: sandbox not ready", "err", err)
-		fmt.Fprint(s, "sssh: sandbox not ready\r\n")
-		s.Exit(1)
+	target, ok := m.resolveTarget(s)
+	if !ok {
 		return
 	}
 	if err := bridge.New(target, s, s).Run(s.Context()); err != nil {
 		slog.Error("frontdoor: owner bridge ended", "err", err)
 		s.Exit(1)
 	}
+}
+
+// resolveTarget resolves how to reach the guest sshd for a connection. When the
+// sandbox is not ready it tells the guest, exits the session, and returns
+// ok=false, so the caller returns without bridging.
+func (m *manager) resolveTarget(s ssh.Session) (vm.Target, bool) {
+	target, err := m.vm.Target()
+	if err != nil {
+		slog.Error("frontdoor: sandbox not ready", "err", err)
+		fmt.Fprint(s, "sssh: sandbox not ready\r\n")
+		s.Exit(1)
+		return vm.Target{}, false
+	}
+	return target, true
 }
 
 // serveGuest runs the join ceremony, waits for the owner's decision, and bridges
@@ -319,11 +330,8 @@ func (m *manager) serveGuest(s ssh.Session) {
 		slog.Info("frontdoor: guest disconnected", "id", sess.ID, "user", sess.Username, "active", m.reg.Count())
 	}()
 
-	target, err := m.vm.Target()
-	if err != nil {
-		slog.Error("frontdoor: sandbox not ready", "err", err)
-		fmt.Fprint(s, "sssh: sandbox not ready\r\n")
-		s.Exit(1)
+	target, ok := m.resolveTarget(s)
+	if !ok {
 		return
 	}
 	if err := bridge.New(target, s, pr).Run(s.Context()); err != nil {

@@ -141,6 +141,7 @@ type model struct {
 
 	rows         []row
 	cursor       int
+	waiting      int // pending requests in rows, derived by refresh
 	prevWaiting  int
 	ownerPresent bool
 	startTime    time.Time
@@ -290,6 +291,7 @@ func (m *model) refresh() (grewWaiting bool) {
 		m.cursor = max(0, len(rows)-1)
 	}
 
+	m.waiting = len(pending)
 	grewWaiting = len(pending) > m.prevWaiting
 	m.prevWaiting = len(pending)
 	return grewWaiting
@@ -313,13 +315,7 @@ func (m model) View() string {
 	seconds := int(duration.Seconds()) % 60
 	fmt.Fprintf(&b, "%-15s %02d:%02d:%02d\n\n", "uptime:", hours, minutes, seconds)
 
-	waiting := 0
-	for _, r := range m.rows {
-		if r.pending {
-			waiting++
-		}
-	}
-	fmt.Fprintf(&b, "connected: %d   waiting: %d\n\n", len(m.rows)-waiting, waiting)
+	fmt.Fprintf(&b, "connected: %d   waiting: %d\n\n", len(m.rows)-m.waiting, m.waiting)
 
 	if len(m.rows) == 0 {
 		b.WriteString("  (no one connected)\n")
