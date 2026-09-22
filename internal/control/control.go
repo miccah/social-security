@@ -55,6 +55,7 @@ func New(reg registry.Registry, front addrProvider, tunnel urlProvider, quit fun
 	return &plane{reg: reg, front: front, tunnel: tunnel, quit: quit}
 }
 
+// Name identifies the control plane in lifecycle logs.
 func (p *plane) Name() string { return "control" }
 
 // Start routes logs to a file so the TUI owns the terminal, then runs the Bubble
@@ -149,12 +150,16 @@ type model struct {
 	confirmingQuit bool
 }
 
+// newModel builds the control-plane model with the connect strings and populates
+// its initial rows from the registry.
 func newModel(reg registry.Registry, guestConnect, ownerConnect string) model {
 	m := model{reg: reg, guestConnect: guestConnect, ownerConnect: ownerConnect, startTime: time.Now()}
 	m.refresh()
 	return m
 }
 
+// Init starts the registry event wait so the UI refreshes on the first state
+// change or timeout.
 func (m model) Init() tea.Cmd { return waitForEvent(m.reg) }
 
 // waitForEvent blocks until the registry reports a change or 1s has passed,
@@ -176,6 +181,8 @@ func ringBell() tea.Msg {
 	return nil
 }
 
+// Update handles key presses and refresh ticks. On a refresh it re-arms the
+// event wait and rings the bell when the number of waiting requests grew.
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
@@ -190,6 +197,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// handleKey dispatches a key press: cursor movement, accept/decline/kick of the
+// selected row, or quit (confirmed first while guests are connected).
 func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.confirmingQuit {
 		return m.handleQuitConfirm(msg)
@@ -243,6 +252,7 @@ func (m model) handleQuitConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 }
 
+// selected returns the row under the cursor, or false when the list is empty.
 func (m model) selected() (row, bool) {
 	if m.cursor < 0 || m.cursor >= len(m.rows) {
 		return row{}, false
@@ -250,6 +260,8 @@ func (m model) selected() (row, bool) {
 	return m.rows[m.cursor], true
 }
 
+// resolveSelected delivers the owner's decision to the selected row when it is a
+// pending request; other rows and resolve errors are ignored.
 func (m model) resolveSelected(d registry.Decision) {
 	if r, ok := m.selected(); ok && r.pending {
 		if err := m.reg.Resolve(r.id, d); err != nil {
@@ -258,6 +270,8 @@ func (m model) resolveSelected(d registry.Decision) {
 	}
 }
 
+// kickSelected kicks the selected row when it is an active session; other rows
+// are ignored.
 func (m model) kickSelected() {
 	if r, ok := m.selected(); ok && !r.pending {
 		m.reg.Kick(r.id)
@@ -297,6 +311,8 @@ func (m *model) refresh() (grewWaiting bool) {
 	return grewWaiting
 }
 
+// View renders the control plane: the connect strings, owner status and uptime,
+// session counts, the selectable request list, and the key legend.
 func (m model) View() string {
 	var b strings.Builder
 	b.WriteString("sssh control\n\n")

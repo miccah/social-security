@@ -39,6 +39,7 @@ func NewWriter(reg registry.Registry, share sharePathProvider) *Writer {
 	return &Writer{reg: reg, share: share}
 }
 
+// Name identifies the co-author writer in lifecycle logs.
 func (w *Writer) Name() string { return "coauthor" }
 
 // Start resolves the share path (so it must start after the VM), writes the

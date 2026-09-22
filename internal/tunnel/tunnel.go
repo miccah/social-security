@@ -42,6 +42,7 @@ type manager struct {
 // New returns a tunnel manager. The ngrok endpoint is opened on Start.
 func New() Manager { return &manager{} }
 
+// Name identifies the tunnel in lifecycle logs.
 func (m *manager) Name() string { return "tunnel" }
 
 // Start authenticates an ngrok agent and opens a public TCP endpoint, keeping

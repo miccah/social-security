@@ -44,9 +44,16 @@ func commitMain(args []string) int {
 	}
 }
 
+// connectedFile returns the path to the connected-usernames list, honoring
+// connectedFileEnv and otherwise using the in-VM default.
 func connectedFile() string { return envOr(connectedFileEnv, defaultConnectedFile) }
+
+// coauthorsFile returns the path to the identity store, honoring coauthorsFileEnv
+// and otherwise using the in-VM default.
 func coauthorsFile() string { return envOr(coauthorsFileEnv, defaultCoauthorsFile) }
 
+// envOr returns the value of the environment variable named key, or def when it
+// is unset or empty.
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v

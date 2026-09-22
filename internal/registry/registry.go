@@ -123,6 +123,7 @@ func New() Registry {
 	}
 }
 
+// Name identifies the registry in lifecycle logs.
 func (r *registry) Name() string { return "registry" }
 
 // Start is a no-op: in-memory state needs no boot step. The method exists so the
@@ -132,6 +133,9 @@ func (r *registry) Start(context.Context) error { return nil }
 // Stop is a no-op for the same reason.
 func (r *registry) Stop(context.Context) error { return nil }
 
+// AddPending claims the username under the lock, then mints a request with a
+// fresh ID, stores it, and notifies watchers. It returns ErrUsernameTaken when
+// the name is already held by a pending or active session.
 func (r *registry) AddPending(username, ssn, remoteAddr string) (*Request, error) {
 	r.mu.Lock()
 	if _, taken := r.names[username]; taken {
@@ -155,6 +159,10 @@ func (r *registry) AddPending(username, ssn, remoteAddr string) (*Request, error
 	return req, nil
 }
 
+// Resolve removes the pending request and hands the decision to the waiting
+// handler over the buffered channel. Accepting requires the owner present and
+// keeps the username claimed for Activate; declining frees it. It errors on an
+// unknown ID and returns ErrOwnerAbsent when accepting with no owner.
 func (r *registry) Resolve(id string, d Decision) error {
 	r.mu.Lock()
 	req, ok := r.pending[id]
@@ -180,6 +188,8 @@ func (r *registry) Resolve(id string, d Decision) error {
 	return nil
 }
 
+// CancelPending drops a still-pending request and frees its username, notifying
+// watchers only when something was removed.
 func (r *registry) CancelPending(id string) {
 	r.mu.Lock()
 	req, ok := r.pending[id]
@@ -194,6 +204,8 @@ func (r *registry) CancelPending(id string) {
 	}
 }
 
+// Activate records the accepted request as an active session, keeping its
+// username claimed from AddPending and registering the on-kick callback.
 func (r *registry) Activate(req *Request, onKick func()) Session {
 	r.mu.Lock()
 	s := Session{
@@ -210,6 +222,8 @@ func (r *registry) Activate(req *Request, onKick func()) Session {
 	return s
 }
 
+// RemoveActive drops an active session, releasing its username and kick callback,
+// and notifies watchers only when something was removed.
 func (r *registry) RemoveActive(id string) {
 	r.mu.Lock()
 	s, ok := r.active[id]
@@ -225,6 +239,8 @@ func (r *registry) RemoveActive(id string) {
 	}
 }
 
+// Kick invokes the session's on-kick callback outside the lock to close its
+// connection. It errors on an unknown ID.
 func (r *registry) Kick(id string) error {
 	r.mu.Lock()
 	onKick, ok := r.kicks[id]
@@ -237,6 +253,8 @@ func (r *registry) Kick(id string) error {
 	return nil
 }
 
+// ClaimOwner takes the owner slot when it is free, returning whether this caller
+// got it, and notifies watchers on success.
 func (r *registry) ClaimOwner() bool {
 	r.mu.Lock()
 	claimed := !r.owner
@@ -251,6 +269,7 @@ func (r *registry) ClaimOwner() bool {
 	return claimed
 }
 
+// ReleaseOwner frees the owner slot and notifies watchers.
 func (r *registry) ReleaseOwner() {
 	r.mu.Lock()
 	r.owner = false
@@ -259,12 +278,14 @@ func (r *registry) ReleaseOwner() {
 	r.notify()
 }
 
+// OwnerPresent reports whether the owner slot is currently claimed.
 func (r *registry) OwnerPresent() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.owner
 }
 
+// Pending returns a snapshot of the waiting requests, oldest first.
 func (r *registry) Pending() []Request {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -276,6 +297,7 @@ func (r *registry) Pending() []Request {
 	return out
 }
 
+// Active returns a snapshot of the active sessions, oldest first.
 func (r *registry) Active() []Session {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -287,12 +309,14 @@ func (r *registry) Active() []Session {
 	return out
 }
 
+// Count returns the number of active sessions.
 func (r *registry) Count() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return len(r.active)
 }
 
+// Events returns the coalesced state-change channel watchers select on.
 func (r *registry) Events() <-chan struct{} { return r.events }
 
 // notify coalesces a state-change signal onto the events channel.

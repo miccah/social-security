@@ -49,6 +49,10 @@ func New(target vm.Target, s ssh.Session, stdin io.Reader) Bridge {
 	return &bridge{target: target, session: s, stdin: stdin}
 }
 
+// Run dials the guest sshd, attaches to the shared pairing tmux, and copies
+// bytes in both directions until ctx is cancelled or either end closes. A normal
+// detach, close, or cancellation returns nil; only an unexpected transport error
+// is surfaced.
 func (b *bridge) Run(ctx context.Context) error {
 	cfg := &gossh.ClientConfig{
 		User: b.target.User,

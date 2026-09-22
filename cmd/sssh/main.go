@@ -39,6 +39,9 @@ func main() {
 	}
 }
 
+// run resolves the project directory, wires the managed subsystems, starts them
+// in dependency order, and blocks until the root context is cancelled before
+// tearing everything down. A failed start unwinds whatever came up and aborts.
 func run() error {
 	// Cancel the root context on SIGINT/SIGTERM so a Ctrl-C in the launching
 	// terminal drives graceful teardown instead of an abrupt exit. Everything

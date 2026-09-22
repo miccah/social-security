@@ -91,6 +91,7 @@ func New(projectDir string) Manager {
 	return &manager{projectDir: projectDir}
 }
 
+// Name identifies the vm manager in lifecycle logs.
 func (m *manager) Name() string { return "vm" }
 
 // Start builds the sandbox, boots it under QEMU, and returns once the guest

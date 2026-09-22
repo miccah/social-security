@@ -83,6 +83,7 @@ func New(reg registry.Registry, vmm vmTarget, guest guestIngress, endSession fun
 	return &manager{reg: reg, vm: vmm, guest: guest, endSession: endSession}
 }
 
+// Name identifies the front door in lifecycle logs.
 func (m *manager) Name() string { return "frontdoor" }
 
 // Addr returns the bound listen address, or "" before Start has bound one.
@@ -153,8 +154,12 @@ func (m *manager) Start(context.Context) error {
 // and never the owner.
 type guestListener struct{ net.Listener }
 
+// Close is a no-op: the tunnel manager owns the underlying listener and closes
+// it, so the ssh server's shutdown must not.
 func (guestListener) Close() error { return nil }
 
+// Accept returns the next tunnel connection tagged as a guest, so the handler
+// never lets it claim the owner slot.
 func (l guestListener) Accept() (net.Conn, error) {
 	conn, err := l.Listener.Accept()
 	if err != nil {
@@ -188,11 +193,14 @@ func (m *manager) serve(ln net.Listener) {
 	}
 }
 
+// Stop tears the front door down, closing the ssh server and its LAN listener.
 func (m *manager) Stop(context.Context) error {
 	m.teardown()
 	return nil
 }
 
+// teardown closes the ssh server, which also closes the LAN listener, and clears
+// the handles. It is safe to call when Start failed partway.
 func (m *manager) teardown() {
 	if m.srv != nil {
 		m.srv.Close() // also closes m.ln
