@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -142,12 +143,13 @@ type model struct {
 	cursor       int
 	prevWaiting  int
 	ownerPresent bool
+	startTime    time.Time
 
 	confirmingQuit bool
 }
 
 func newModel(reg registry.Registry, guestConnect, ownerConnect string) model {
-	m := model{reg: reg, guestConnect: guestConnect, ownerConnect: ownerConnect}
+	m := model{reg: reg, guestConnect: guestConnect, ownerConnect: ownerConnect, startTime: time.Now()}
 	m.refresh()
 	return m
 }
@@ -299,7 +301,13 @@ func (m model) View() string {
 	if m.ownerPresent {
 		ownerStatus = "joined"
 	}
-	fmt.Fprintf(&b, "%-15s %s\n\n", "owner:", ownerStatus)
+	fmt.Fprintf(&b, "%-15s %s\n", "owner:", ownerStatus)
+
+	duration := time.Since(m.startTime)
+	hours := int(duration.Hours())
+	minutes := int(duration.Minutes()) % 60
+	seconds := int(duration.Seconds()) % 60
+	fmt.Fprintf(&b, "%-15s %02d:%02d:%02d\n\n", "uptime:", hours, minutes, seconds)
 
 	waiting := 0
 	for _, r := range m.rows {
