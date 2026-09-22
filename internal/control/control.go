@@ -156,11 +156,15 @@ func newModel(reg registry.Registry, guestConnect, ownerConnect string) model {
 
 func (m model) Init() tea.Cmd { return waitForEvent(m.reg) }
 
-// waitForEvent blocks until the registry reports a change, then asks the model to
-// refresh. Coalesced events mean one wakeup reflects the latest state.
+// waitForEvent blocks until the registry reports a change or 1s has passed,
+// then asks the model to refresh. Coalesced events mean one wakeup reflects
+// the latest state.
 func waitForEvent(reg registry.Registry) tea.Cmd {
 	return func() tea.Msg {
-		<-reg.Events()
+		select {
+		case <-reg.Events():
+		case <-time.After(1 * time.Second):
+		}
 		return refreshMsg{}
 	}
 }
